@@ -27,7 +27,7 @@ async def cmd_start(message: Message, bot: Bot):
         return
 
     await message.answer(
-        f"👋 Вітаємо, {user['first_name']} у тренажері **TurboZNO**!\n\n"
+        f"👋 Вітаємо, {user['first_name']} у тренажері **NetaNMT**!\n\n"
         f"📈 Твій статус: {'Premium (Безліміт) 💎' if user['is_premium'] else 'Безкоштовний 🆓'}\n"
         f"⏳ Залишилось безкоштовних тестів на сьогодні: {user['daily_tests_left'] if not user['is_premium'] else '∞'}\n\n"
         "👉 Напиши /quiz, щоб розпочати тестування."
