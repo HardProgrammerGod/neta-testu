@@ -15,7 +15,7 @@ async def start_quiz(message: Message, bot: Bot):
     
     # Перевірка лімітів та виставлення рахунку в Telegram Stars (валюта XTR)
     if not user["is_premium"] and user["daily_tests_left"] <= 0:
-        prices = [LabeledPrice(label="Premium 30 днів", amount=50)] # 50 Stars
+        prices = [LabeledPrice(label="Premium 30 днів", amount=100)] # 50 Stars
         await bot.send_invoice(
             chat_id=message.chat.id,
             title="💎 Перехід на Premium допуск",
