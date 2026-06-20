@@ -3,3 +3,4 @@ supabase==2.6.0
 pydantic==2.8.2
 pydantic-core==2.20.1
 aiohttp==3.10.5
+python-dotenv==1.0.1
