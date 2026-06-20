@@ -16,14 +16,14 @@ async def admin_panel(message: Message):
     total_tasks = supabase.table("tasks").select("id", count="exact").execute().count
     
     await message.answer(
-        "⚙️ **Адмін-панель TurboZNO**\n\n"
+        "⚙️ Адмін-панель NetaNMT\n\n"
         f"👥 Всього користувачів: `{total_users}`\n"
         f"💎 З них Premium: `{premium_users}`\n"
         f"📚 Тестів у базі: `{total_tasks}`\n\n"
         "📥 **Як завантажити нові тести:**\n"
         "Надішли мені `.csv` файл. Структура стовпців має бути такою:\n"
         "`section,question_text,options,correct_answer,explanation`\n\n"
-        "*Примітка для варіантів (options):* розділяй їх знаком `;` (наприклад: `A) see;B) saw;C) seen`)"
+        "Примітка для варіантів (options): розділяй їх знаком `;` (наприклад: `A) see;B) saw;C) seen`)"
     )
 
 @router.message(F.document, F.from_user.id == ADMIN_ID)
