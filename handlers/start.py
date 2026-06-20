@@ -20,14 +20,14 @@ async def cmd_start(message: Message, bot: Bot):
     
     if not await check_subscription(bot, message.from_user.id):
         await message.answer(
-            "⚠️ **Доступ обмежено!**\n\n"
+            "⚠️ Доступ обмежено!\n\n"
             "Щоб проходити тести та готуватись до ЗНО/НМТ з англійської, підпишись на наш канал.\n\n"
             "Після підписки знову натисни /start"
         )
         return
 
     await message.answer(
-        f"👋 Вітаємо, {user['first_name']} у тренажері **NetaNMT**!\n\n"
+        f"👋 Вітаємо, {user['first_name']} у тренажері NetaNMT!\n\n"
         f"📈 Твій статус: {'Premium (Безліміт) 💎' if user['is_premium'] else 'Безкоштовний 🆓'}\n"
         f"⏳ Залишилось безкоштовних тестів на сьогодні: {user['daily_tests_left'] if not user['is_premium'] else '∞'}\n\n"
         "👉 Напиши /quiz, щоб розпочати тестування."
