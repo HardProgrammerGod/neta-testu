@@ -34,7 +34,7 @@ async def cmd_start(message: Message, bot: Bot):
         ])
         
         await message.answer(
-            "⚠️ **Доступ обмежено!**\n\n"
+            "⚠️ Доступ обмежено!\n\n"
             "Щоб проходити унікальні авторські тести, бачити зливи НМТ та детальні розбори помилок, "
             "підпишись на наш канал.\n\n"
             "Після підписки натисни кнопку нижче або відправ /start ще раз 👇",
@@ -47,9 +47,9 @@ async def cmd_start(message: Message, bot: Bot):
     limits_text = "∞" if user.get('is_premium') else str(user.get('daily_tests_left', 0))
 
     await message.answer(
-        f"👋 **Вітаємо, {user['first_name']}, у тренажері NetaNMT!**\n\n"
-        f"📊 Твій статус: `{status_text}`\n"
-        f"⏳ Спроб на сьогодні: `{limits_text}`\n\n"
+        f"👋 Вітаємо, {user['first_name']}, у тренажері NetaNMT!\n\n"
+        f"📊 Твій статус: {status_text}\n"
+        f"⏳ Спроб на сьогодні: {limits_text}\n\n"
         "👉 Напиши команду /quiz, щоб відкрити меню тестів та обрати варіант!"
     )
 
