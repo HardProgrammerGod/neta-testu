@@ -86,4 +86,4 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
 async def success_payment(message: Message):
     from database.db_client import supabase
     supabase.table("users").update({"is_premium": True}).eq("id", message.from_user.id).execute()
-    await message.answer("💎 **Преміум активовано!** Тобі відкрито безлімітний доступ до всіх тестів тренажера. Успішного навчання!")
+    await message.answer("💎 Преміум активовано! Тобі відкрито безлімітний доступ до всіх тестів тренажера. Успішного навчання!")
