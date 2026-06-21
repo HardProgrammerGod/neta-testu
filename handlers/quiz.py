@@ -205,6 +205,44 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @router.message(F.successful_payment)
-async def success_payment(message: Message):
-    supabase.table("users").update({"is_premium": True}).eq("id", message.from_user.id).execute()
-    await message.answer("💎 **Преміум активовано за 250 Stars!** Тобі відкрито безліміт на всі тести та повні пояснення до помилок. Успіху на НМТ!")
+async def success_payment(message: Message, bot: Bot):
+    user_id = message.from_user.id
+    
+    # 1. Спочатку дізнаємося поточний реферальний статус покупця БЕЗ завантаження зайвих даних
+    user_data = supabase.table("users").select("referred_by", "is_premium").eq("id", user_id).execute().data[0]
+    
+    # Якщо у користувача вже був преміум, і це повторна дія — просто ігноруємо реферальний бонус
+    if not user_data["is_premium"]:
+        referrer_id = user_data.get("referred_by")
+        
+        if referrer_id:
+            # Отримуємо дані того, хто запросив
+            ref_user = supabase.table("users").select("premium_referrals_count", "referral_balance").eq("id", referrer_id).execute()
+            
+            if ref_user.data:
+                new_premium_count = ref_user.data[0]["premium_referrals_count"] + 1
+                # Нараховуємо бонус за покупку реферала (наприклад, 100 зірок/одиниць на баланс)
+                new_balance = ref_user.data[0]["referral_balance"] + 100 
+                
+                # Оновлюємо дані куратора в БД
+                supabase.table("users").update({
+                    "premium_referrals_count": new_premium_count,
+                    "referral_balance": new_balance
+                }).eq("id", referrer_id).execute()
+                
+                # Безпечно надсилаємо куратору повідомлення про заробіток
+                try:
+                    await bot.send_message(
+                        chat_id=referrer_id,
+                        text=f"💎 **Твій реферал купив Premium!**\n"
+                             f"Тобі нараховано бонус на баланс профілю. Перевір через /profile"
+                    )
+                except Exception:
+                    pass # Якщо куратор заблокував бота, сервіс не падає
+
+    # 2. Активуємо Premium самому покупцеві
+    supabase.table("users").update({"is_premium": True}).eq("id", user_id).execute()
+    
+    await message.answer(
+        "💎 **Преміум активовано!** Тобі відкрито безлімітний доступ до всіх тестів тренажера та авторських пояснень. Успішного навчання!"
+    )
