@@ -13,7 +13,7 @@ dp.include_router(admin.router)
 dp.include_router(profile.router)
 
 async def handle_ping(request):
-    return web.Response(text="TurboZNO is actively running!")
+    return web.Response(text="NetaNMT is actively running!")
 
 async def start_web_server():
     app = web.Application()
