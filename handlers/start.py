@@ -1,7 +1,7 @@
-from aiogram import Router, Bot
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Router, Bot, F  # <--- Додали F сюди
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery  # <--- Додали CallbackQuery сюди
 from aiogram.filters import CommandStart
-from database.db_client import get_or_create_user
+from database.db_client import get_or_create_user, supabase
 from config import CHANNEL_ID
 
 router = Router()
