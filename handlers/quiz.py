@@ -25,7 +25,7 @@ async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
         [InlineKeyboardButton(text="🔥 Зливи НМТ", callback_data="viewcat_leak")],
         [InlineKeyboardButton(text="📝 Пробні варіанти", callback_data="viewcat_mock")]
     ])
-    await message.answer("🎯 **Вибери категорію тестування:**", reply_markup=kb)
+    await message.answer("🎯 Вибери категорію тестування:", reply_markup=kb)
 
 
 # 2. Динамічне підменю тестів
@@ -49,7 +49,7 @@ async def show_subcategories(callback: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main_menu")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    await callback.message.edit_text("📅 **Вибери конкретний варіант/тест із бази:**", reply_markup=kb)
+    await callback.message.edit_text("📅 Вибери конкретний варіант/тест із бази:", reply_markup=kb)
     await callback.answer()
 
 
@@ -69,7 +69,7 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     
     if not user["is_premium"] and user["daily_tests_left"] <= 0:
-        prices = [LabeledPrice(label="Premium допуск (500 Stars)", amount=500)] # 250 Stars
+        prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)] # 250 Stars
         await bot.send_invoice(
             chat_id=callback.message.chat.id,
             title="💎 Активація Premium доступу",
@@ -173,16 +173,16 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     if is_correct:
         correct_count += 1
         await state.update_data(correct_count=correct_count)
-        result_text = "🎉 **Правильно!**"
+        result_text = "🎉 Правильно!"
     else:
-        result_text = f"❌ **Неправильно.**\n\nПравильна відповідь: `{task['correct_answer']}`\n\n"
+        result_text = f"❌ Неправильно.\n\nПравильна відповідь: `{task['correct_answer']}`\n\n"
         if user["is_premium"]:
             if task.get("explanation"):
-                result_text += f"💡 **Пояснення:**\n{task['explanation']}"
+                result_text += f"💡 Пояснення:\n{task['explanation']}"
             else:
-                result_text += "💡 *Адмін ще не додав пояснення до цього завдання.*"
+                result_text += "💡 Адмін ще не додав пояснення до цього завдання."
         else:
-            result_text += "🔒 *Пояснення цієї помилки доступне тільки для Premium користувачів.*"
+            result_text += "🔒 Пояснення цієї помилки доступне тільки для Premium користувачів."
             
     # Додаємо inline-кнопку для переходу до наступного кроку, щоб зафіксувати результат
     next_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -218,7 +218,7 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
         success_pct = int((correct_count / len(task_ids)) * 100)
         
         await callback.message.edit_text(
-            f"🏁 **ТЕСТ ЗАВЕРШЕНО!**\n\n"
+            f"🏁 ТЕСТ ЗАВЕРШЕНО!\n\n"
             f"📊 Твій підсумковий результат:\n"
             f"✅ Правильних відповідей: `{correct_count}` з `{len(task_ids)}`\n"
             f"📈 Успішність: `{success_pct}%`\n\n"
@@ -255,10 +255,10 @@ async def success_payment(message: Message, bot: Bot):
                 try:
                     await bot.send_message(
                         chat_id=referrer_id,
-                        text="💎 **Твій реферал купив Premium!**\nТобі нараховано бонус на баланс профілю. Перевір через /profile"
+                        text="💎 Твій реферал купив Premium!\nТобі нараховано бонус на баланс профілю. Перевір через /profile"
                     )
                 except Exception:
                     pass
 
     supabase.table("users").update({"is_premium": True}).eq("id", user_id).execute()
-    await message.answer("💎 **Преміум активовано!** Тобі відкрито безлімітний доступ до всіх тестів тренажера та авторських пояснень. Успішного навчання!")
+    await message.answer("💎 Преміум активовано! Тобі відкрито безлімітний доступ до всіх тестів тренажера та авторських пояснень. Успішного навчання!")
