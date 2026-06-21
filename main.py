@@ -2,7 +2,7 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from aiohttp import web
 from config import BOT_TOKEN, PORT
-from handlers import start, quiz, admin
+from handlers import start, quiz, admin, profile
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
