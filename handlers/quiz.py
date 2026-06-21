@@ -7,7 +7,6 @@ from handlers.start import check_subscription
 
 router = Router()
 
-# Стейт для збереження ходу тестування
 class QuizSession(StatesGroup):
     in_progress = State()
 
@@ -15,7 +14,7 @@ class QuizSession(StatesGroup):
 # 1. Головне меню вибору категорії
 @router.message(F.text == "/quiz")
 async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
-    await state.clear() # Скидаємо старі сесії, якщо вони були
+    await state.clear()  # Скидаємо старі сесії беззастережно
     
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Будь ласка, спочатку підпишись на наш канал!")
@@ -29,25 +28,21 @@ async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
     await message.answer("🎯 **Вибери категорію тестування:**", reply_markup=kb)
 
 
-# 2. Динамічне підменю доступних тестів із бази даних
+# 2. Динамічне підменю тестів
 @router.callback_query(F.data.startswith("viewcat_"))
 async def show_subcategories(callback: CallbackQuery):
     category = callback.data.split("_")[1]
     
-    # Робимо швидкий SELECT DISTINCT (групування) в Supabase, щоб знайти унікальні підкатегорії
-    # Зі списку завдань витягуються унікальні назви на кшталт "17_june", "mock_1" тощо.
     res = supabase.table("tasks").select("sub_category").eq("category", category).execute()
     
     if not res.data:
         await callback.message.edit_text("📝 У цій категорії ще немає завантажених тестів. Адмін скоро додасть їх!")
         return
     
-    # Очищаємо дублікати підкатегорій в Python
     sub_categories = sorted(list(set(item['sub_category'] for item in res.data)))
     
     buttons = []
     for sub in sub_categories:
-        # Красиво форматуємо назву для кнопки (наприклад, "17_june" -> "17 june")
         display_name = sub.replace("_", " ").capitalize()
         buttons.append([InlineKeyboardButton(text=display_name, callback_data=f"startset_{category}_{sub}")])
         
@@ -60,7 +55,10 @@ async def show_subcategories(callback: CallbackQuery):
 
 @router.callback_query(F.data == "back_to_main_menu")
 async def back_to_main(callback: CallbackQuery, bot: Bot, state: FSMContext):
-    await callback.message.delete()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await start_quiz_menu(callback.message, bot, state)
     await callback.answer()
 
@@ -70,7 +68,6 @@ async def back_to_main(callback: CallbackQuery, bot: Bot, state: FSMContext):
 async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMContext):
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     
-    # Перевірка щоденних лімітів для безкоштовних користувачів
     if not user["is_premium"] and user["daily_tests_left"] <= 0:
         prices = [LabeledPrice(label="Premium допуск (500 Stars)", amount=500)] # 250 Stars
         await bot.send_invoice(
@@ -87,7 +84,6 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
 
     _, category, sub_category = callback.data.split("_")
     
-    # Витягуємо ТІЛЬКИ ID завдань для цього тесту. Сортуємо по ID, щоб вони йшли по черзі
     res = supabase.table("tasks").select("id").eq("category", category).eq("sub_category", sub_category).order("id").execute()
     
     if not res.data:
@@ -100,7 +96,6 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     if not user["is_premium"]:
         await decrease_test_limit(callback.from_user.id, user["daily_tests_left"])
         
-    # Зберігаємо в пам'ять тільки ID-шники (це займає мізерні байти)
     await state.update_data(
         task_ids=task_ids,
         current_index=0,
@@ -110,30 +105,40 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     )
     await state.set_state(QuizSession.in_progress)
     
-    # Завантажуємо та показуємо перше питання
-    await send_next_question_ui(callback.message, task_ids[0], 0, len(task_ids))
+    # Видаляємо старе меню вибору, щоб очистити інтерфейс
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    # Надсилаємо перше питання як НОВЕ повідомлення
+    await send_next_question_ui(callback.message, task_ids[0], 0, len(task_ids), edit=False)
     await callback.answer()
 
 
-async def send_next_question_ui(message: Message, task_id: int, index: int, total: int):
-    """Швидко дістає одне питання з БД по ID та рендерить кнопки."""
+async def send_next_question_ui(message: Message, task_id: int, index: int, total: int, edit: bool = False):
+    """Швидко дістає одне питання з БД по ID та рендерить або редагує повідомлення."""
     res = supabase.table("tasks").select("*").eq("id", task_id).execute()
     task = res.data[0]
     
     buttons = []
     for opt in task["options"]:
-        # Передаємо тільки індекс відповіді, щоб не перевищити ліміт у 64 байти в callback_data
         buttons.append([InlineKeyboardButton(text=opt, callback_data=f"select_{opt[0]}")])
         
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    await message.answer(
+    text = (
         f"📝 **Завдання {index + 1} з {total}**\n"
         f"Розділ: #{task['section']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{task['question_text']}",
-        reply_markup=kb
+        f"{task['question_text']}"
     )
+    
+    # Якщо edit=True — редагуємо поточне повідомлення (заощаджує простір і RAM)
+    if edit:
+        await message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
 
 # 4. Обробка відповіді користувача всередині активної сесії
@@ -141,20 +146,29 @@ async def send_next_question_ui(message: Message, task_id: int, index: int, tota
 async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     selected = callback.data.split("_")[1]
     
-    # Отримуємо дані поточного тесту з FSM
     session_data = await state.get_data()
-    task_ids = session_data["task_ids"]
-    current_index = session_data["current_index"]
-    correct_count = session_data["correct_count"]
+    task_ids = session_data.get("task_ids", [])
+    current_index = session_data.get("current_index", 0)
+    correct_count = session_data.get("correct_count", 0)
     
+    if not task_ids or current_index >= len(task_ids):
+        await state.clear()
+        await callback.answer("❌ Сесія тестування застаріла.")
+        return
+        
     current_task_id = task_ids[current_index]
     
-    # Беремо дані питання з бази
     task = supabase.table("tasks").select("*").eq("id", current_task_id).execute().data[0]
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     
     is_correct = (selected == task["correct_answer"])
+    
+    # ВИПРАВЛЕНО: викликаємо збереження спроби строго ОДИН раз
     await save_attempt(callback.from_user.id, current_task_id, selected, is_correct)
+    
+    # Оновлюємо кількість пройдених тестів у БД (+1)
+    new_passed = user.get("total_tests_passed", 0) + 1
+    supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", callback.from_user.id).execute()
     
     if is_correct:
         correct_count += 1
@@ -162,7 +176,6 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
         result_text = "🎉 **Правильно!**"
     else:
         result_text = f"❌ **Неправильно.**\n\nПравильна відповідь: `{task['correct_answer']}`\n\n"
-        # 🔒 Перевірка преміуму на показ пояснення
         if user["is_premium"]:
             if task.get("explanation"):
                 result_text += f"💡 **Пояснення:**\n{task['explanation']}"
@@ -171,78 +184,81 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
         else:
             result_text += "🔒 *Пояснення цієї помилки доступне тільки для Premium користувачів.*"
             
-    # Прибираємо інтерактивні кнопки, щоб зафіксувати вибір
+    # Додаємо inline-кнопку для переходу до наступного кроку, щоб зафіксувати результат
+    next_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Наступне питання ➡️", callback_data="session_next_step")]
+    ])
+    
+    # Редагуємо текст, виводячи результат
     await callback.message.edit_text(
         f"{callback.message.text}\n\n📊 Твій вибір: *{selected}*\n\n{result_text}", 
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=next_kb
     )
     await callback.answer()
+
+
+# 5. Перехід до наступного питання по кнопці (Захист від спаму і багів FSM)
+@router.callback_query(QuizSession.in_progress, F.data == "session_next_step")
+async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
+    session_data = await state.get_data()
+    task_ids = session_data.get("task_ids", [])
+    current_index = session_data.get("current_index", 0)
+    correct_count = session_data.get("correct_count", 0)
     
-    # Розрахунок наступного кроку
     next_index = current_index + 1
     await state.update_data(current_index=next_index)
     
     if next_index < len(task_ids):
-        # Якщо є наступне питання — виводимо його
-        await send_next_question_ui(callback.message, task_ids[next_index], next_index, len(task_ids))
+        # Редагуємо ЦЕ Ж повідомлення під нове питання, замінюючи текст та inline-кнопки
+        await send_next_question_ui(callback.message, task_ids[next_index], next_index, len(task_ids), edit=True)
     else:
-        # Тест завершено
+        # Тест повністю завершено
         await state.clear()
         success_pct = int((correct_count / len(task_ids)) * 100)
         
-        await callback.message.answer(
+        await callback.message.edit_text(
             f"🏁 **ТЕСТ ЗАВЕРШЕНО!**\n\n"
             f"📊 Твій підсумковий результат:\n"
             f"✅ Правильних відповідей: `{correct_count}` з `{len(task_ids)}`\n"
             f"📈 Успішність: `{success_pct}%`\n\n"
-            f"👉 Напиши /quiz, щоб відкрити каталог та спробувати інший тест!"
+            f"👉 Напиши /quiz, щоб відкрити каталог та спробувати інший тест!",
+            parse_mode="Markdown"
         )
+    await callback.answer()
 
 
-# --- Стандартна логіка оплати 250 Telegram Stars (XTR) ---
+# --- Логіка оплати 250 Telegram Stars (XTR) ---
 @router.pre_checkout_query()
 async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
+
 @router.message(F.successful_payment)
 async def success_payment(message: Message, bot: Bot):
     user_id = message.from_user.id
-    
-    # 1. Спочатку дізнаємося поточний реферальний статус покупця БЕЗ завантаження зайвих даних
     user_data = supabase.table("users").select("referred_by", "is_premium").eq("id", user_id).execute().data[0]
     
-    # Якщо у користувача вже був преміум, і це повторна дія — просто ігноруємо реферальний бонус
     if not user_data["is_premium"]:
         referrer_id = user_data.get("referred_by")
-        
         if referrer_id:
-            # Отримуємо дані того, хто запросив
             ref_user = supabase.table("users").select("premium_referrals_count", "referral_balance").eq("id", referrer_id).execute()
-            
             if ref_user.data:
                 new_premium_count = ref_user.data[0]["premium_referrals_count"] + 1
-                # Нараховуємо бонус за покупку реферала (наприклад, 100 зірок/одиниць на баланс)
                 new_balance = ref_user.data[0]["referral_balance"] + 100 
                 
-                # Оновлюємо дані куратора в БД
                 supabase.table("users").update({
                     "premium_referrals_count": new_premium_count,
                     "referral_balance": new_balance
                 }).eq("id", referrer_id).execute()
                 
-                # Безпечно надсилаємо куратору повідомлення про заробіток
                 try:
                     await bot.send_message(
                         chat_id=referrer_id,
-                        text=f"💎 **Твій реферал купив Premium!**\n"
-                             f"Тобі нараховано бонус на баланс профілю. Перевір через /profile"
+                        text="💎 **Твій реферал купив Premium!**\nТобі нараховано бонус на баланс профілю. Перевір через /profile"
                     )
                 except Exception:
-                    pass # Якщо куратор заблокував бота, сервіс не падає
+                    pass
 
-    # 2. Активуємо Premium самому покупцеві
     supabase.table("users").update({"is_premium": True}).eq("id", user_id).execute()
-    
-    await message.answer(
-        "💎 **Преміум активовано!** Тобі відкрито безлімітний доступ до всіх тестів тренажера та авторських пояснень. Успішного навчання!"
-    )
+    await message.answer("💎 **Преміум активовано!** Тобі відкрито безлімітний доступ до всіх тестів тренажера та авторських пояснень. Успішного навчання!")
