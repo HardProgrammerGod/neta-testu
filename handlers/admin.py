@@ -83,7 +83,12 @@ async def handle_csv_upload(message: Message):
     
     tasks_to_insert = []
     for row in reader:
-        options_list = [opt.strip() for opt in row['options'].split(';')]
+        options_raw = row.get('options')
+
+        if not options_raw:
+            continue  # пропускає зламані рядки
+
+        options_list = [opt.strip() for opt in options_raw.split(';')]
         tasks_to_insert.append({
             "category": row.get('category', 'author').strip(),
             "sub_category": row.get('sub_category', 'general').strip(),
