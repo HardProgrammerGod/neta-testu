@@ -6,69 +6,121 @@ from config import ADMIN_ID
 
 router = Router()
 
+BOT_USERNAME = "netaNMT_bot"
+SUPPORT_BOT = "netashoolbot"
+
+
+# ---------------------------
+# PROFILE COMMAND
+# ---------------------------
 @router.message(Command("profile"))
 async def show_profile(message: Message, bot: Bot):
-    user_id = message.from_user.id
-    
-    # Отримуємо свіжі дані користувача з бази
-    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
-    
-    # s
-    ref_link = f"https://t.me/netaNMT_bot?start={user_id}"
-    
-    status_text = "Premium 💎" if user.get('is_premium') else "Безкоштовний 🆓"
-    
-    profile_message = (
-        "👤 **МІЙ ПРОФІЛЬ NetaNMT**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"ℹ️ **Ім'я:** {user['first_name']}\n"
-        f"📊 **Статус аккаунта:** `{status_text}`\n"
-        f"📝 **Пройдено завдань:** `{user.get('total_tests_passed', 0)}` шт.\n\n"
-        "👥 **Реферальна система:**\n"
-        f"├ Запрошено друзів: `{user.get('referral_count', 0)}`\n"
-        f"└ З них купили Premium: `{user.get('premium_referrals_count', 0)}` 💎\n\n"
-        f"💰 **Баланс до виведення:** `{user.get('referral_balance', 0)} 🌟`\n\n"
-        f"🔗 **Твоє реферальне посилання:**\n`{ref_link}`\n\n"
-        "🎁 _Ділися посиланням з друзями! За кожну купівлю Premium твоїм рефералом ти отримуєш відсоток на баланс!_"
+    user = await get_or_create_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name
     )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Вивести кошти / Задати питання", callback_data="withdraw_req")],
-        [InlineKeyboardButton(text="🔄 Оновити профіль", callback_data="refresh_profile")]
-    ])
-    
-    await message.answer(profile_message, parse_mode="Markdown", reply_markup=kb)
 
+    ref_link = f"https://t.me/{BOT_USERNAME}?start={message.from_user.id}"
+
+    status = "💎 Premium" if user.get("is_premium") else "🆓 Free"
+
+    text = (
+        "👤 Профіль користувача\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Імʼя: {user.get('first_name')}\n"
+        f"Статус: {status}\n"
+        f"Вирішено задач: {user.get('total_tests_passed', 0)}\n\n"
+        "👥 Реферали:\n"
+        f"- Запрошено: {user.get('referral_count', 0)}\n"
+        f"- Premium реферали: {user.get('premium_referrals_count', 0)}\n\n"
+        f"💰 Баланс: {user.get('referral_balance', 0)} ⭐\n\n"
+        f"🔗 Реферальне посилання:\n{ref_link}\n"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💰 Вивід коштів", url=f"https://t.me/{SUPPORT_BOT}")
+        ],
+        [
+            InlineKeyboardButton(text="🔄 Оновити", callback_data="refresh_profile"),
+            InlineKeyboardButton(text="📩 Підтримка", url=f"https://t.me/{SUPPORT_BOT}")
+        ]
+    ])
+
+    await message.answer(text, reply_markup=kb)
+
+
+# ---------------------------
+# REFRESH PROFILE
+# ---------------------------
 @router.callback_query(F.data == "refresh_profile")
-async def refresh_profile_callback(callback: CallbackQuery, bot: Bot):
+async def refresh(callback: CallbackQuery, bot: Bot):
     await callback.message.delete()
-    # Імітуємо команду текстового профілю, передаючи об'єкт повідомлення
     await show_profile(callback.message, bot)
     await callback.answer()
 
-@router.callback_query(F.data == "withdraw_req")
-async def withdraw_request(callback: CallbackQuery, bot: Bot):
-    user_id = callback.from_user.id
-    user_res = supabase.table("users").select("*").eq("id", user_id).execute()
-    user = user_res.data[0]
-    
-    balance = user.get('referral_balance', 0)
-    
-    if balance <= 0:
-        await callback.answer("❌ У тебе на балансі 0. Запрошуй друзів, які купують Premium, щоб заробити!", show_alert=True)
+
+# ---------------------------
+# WITHDRAW / REQUEST MONEY
+# ---------------------------
+@router.callback_query(F.data == "withdraw")
+async def withdraw(callback: CallbackQuery, bot: Bot):
+    user = supabase.table("users").select("*").eq("id", callback.from_user.id).execute()
+
+    if not user.data:
+        await callback.answer("Помилка профілю", show_alert=True)
         return
-        
-    # Безпечне сповіщення адміна про заявку на виведення
+
+    user = user.data[0]
+    balance = user.get("referral_balance", 0)
+
+    if balance <= 0:
+        await callback.answer(
+            "❌ Баланс порожній. Запрошуй друзів для заробітку!",
+            show_alert=True
+        )
+        return
+
+    # повідомлення адмінy (без Markdown — безпечно)
     try:
         await bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"💰 **ЗАЯВКА НА ВИВЕДЕННЯ КОШТІВ**\n\n"
-                 f"👤 Користувач: {user['first_name']} (ID: `{user_id}`)\n"
-                 f"Username: @{user['username'] if user['username'] else 'немає'}\n"
-                 f"💸 Сума до виведення: `{balance}`"
+            text=(
+                "💰 ЗАЯВКА НА ВИВІД\n\n"
+                f"Користувач: {user.get('first_name')}\n"
+                f"ID: {callback.from_user.id}\n"
+                f"Username: @{user.get('username')}\n"
+                f"Баланс: {balance} ⭐"
+            )
         )
-        await callback.message.answer("✅ **Заявку успішно надіслано адміну!** Очікуй, з тобою зв'яжуться найближчим часом.")
+
+        await callback.message.answer(
+            "✅ Заявку відправлено. Очікуй відповіді!"
+        )
+
     except Exception:
-        await callback.message.answer("⚠️ Помилка зв'язку з адміном. Спробуй написати в підтримку напряму.")
-        
+        await callback.message.answer(
+            "⚠️ Не вдалося відправити заявку. Напиши в підтримку."
+        )
+
     await callback.answer()
+
+
+# ---------------------------
+# SUPPORT COMMAND (опціонально)
+# ---------------------------
+@router.message(Command("support"))
+async def support(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📩 Написати підтримці",
+            url=f"https://t.me/{SUPPORT_BOT}"
+        )]
+    ])
+
+    await message.answer(
+        "📩 Підтримка та співпраця\n\n"
+        "Якщо у тебе питання щодо бота, помилки або пропозиції — напиши нам.",
+        reply_markup=kb
+    )
