@@ -13,8 +13,8 @@ async def show_profile(message: Message, bot: Bot):
     # Отримуємо свіжі дані користувача з бази
     user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     
-    # Формуємо реферальне посилання СТРОГО на вказаного тобою бота @netaschoolbot
-    ref_link = f"https://t.me/netaschoolbot?start={user_id}"
+    # s
+    ref_link = f"https://t.me/netaNMT_bot?start={user_id}"
     
     status_text = "Premium 💎" if user.get('is_premium') else "Безкоштовний 🆓"
     
