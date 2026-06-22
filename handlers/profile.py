@@ -7,7 +7,7 @@ from config import ADMIN_ID
 router = Router()
 
 BOT_USERNAME = "netaNMT_bot"
-SUPPORT_BOT = "netashoolbot"
+SUPPORT_BOT = "netaschoolbot"
 
 
 # ---------------------------
