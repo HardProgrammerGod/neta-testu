@@ -11,7 +11,7 @@ SUPPORT_BOT = "netaschoolbot"
 
 
 # ---------------------------
-# PROFILE COMMAND
+# PROFILE
 # ---------------------------
 @router.message(Command("profile"))
 async def show_profile(message: Message, bot: Bot):
@@ -23,36 +23,54 @@ async def show_profile(message: Message, bot: Bot):
 
     ref_link = f"https://t.me/{BOT_USERNAME}?start={message.from_user.id}"
 
-    status = "💎 Premium" if user.get("is_premium") else "🆓 Free"
+    status = "💎 <b>Premium</b>" if user.get("is_premium") else "🆓 <b>Free</b>"
 
     text = (
-        "👤 Профіль користувача\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Імʼя: {user.get('first_name')}\n"
-        f"Статус: {status}\n"
-        f"Вирішено задач: {user.get('total_tests_passed', 0)}\n\n"
-        "👥 Реферали:\n"
-        f"- Запрошено: {user.get('referral_count', 0)}\n"
-        f"- Premium реферали: {user.get('premium_referrals_count', 0)}\n\n"
-        f"💰 Баланс: {user.get('referral_balance', 0)} ⭐\n\n"
-        f"🔗 Реферальне посилання:\n{ref_link}\n"
+        "👤 <b>ПРОФІЛЬ</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+
+        f"🧑 Імʼя: <b>{user.get('first_name')}</b>\n"
+        f"📊 Статус: {status}\n"
+        f"📚 Тести: <b>{user.get('total_tests_passed', 0)}</b>\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
+        "👥 <b>РЕФЕРАЛИ</b>\n\n"
+        f"👤 Запрошено: <b>{user.get('referral_count', 0)}</b>\n"
+        f"💎 Premium: <b>{user.get('premium_referrals_count', 0)}</b>\n"
+        f"💰 Баланс: <b>{user.get('referral_balance', 0)} ⭐</b>\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
+        "🔗 <b>РЕФЕРАЛЬНЕ ПОСИЛАННЯ</b>\n"
+        f"<code>{ref_link}</code>\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
+        "🎯 <i>Запрошуй друзів і заробляй бонуси</i>"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💰 Вивід коштів", url=f"https://t.me/{SUPPORT_BOT}")
+            InlineKeyboardButton(
+                text="📤 Поділитись реферальним",
+                url=f"https://t.me/share/url?url={ref_link}"
+            )
         ],
         [
-            InlineKeyboardButton(text="🔄 Оновити", callback_data="refresh_profile"),
-            InlineKeyboardButton(text="📩 Підтримка", url=f"https://t.me/{SUPPORT_BOT}")
+            InlineKeyboardButton(text="💰 Вивід коштів", callback_data="withdraw"),
+            InlineKeyboardButton(text="🔄 Оновити", callback_data="refresh_profile")
+        ],
+        [
+            InlineKeyboardButton(
+                text="📩 Підтримка / співпраця",
+                url=f"https://t.me/{SUPPORT_BOT}"
+            )
         ]
     ])
 
-    await message.answer(text, reply_markup=kb)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 # ---------------------------
-# REFRESH PROFILE
+# REFRESH
 # ---------------------------
 @router.callback_query(F.data == "refresh_profile")
 async def refresh(callback: CallbackQuery, bot: Bot):
@@ -62,65 +80,63 @@ async def refresh(callback: CallbackQuery, bot: Bot):
 
 
 # ---------------------------
-# WITHDRAW / REQUEST MONEY
+# WITHDRAW
 # ---------------------------
 @router.callback_query(F.data == "withdraw")
 async def withdraw(callback: CallbackQuery, bot: Bot):
-    user = supabase.table("users").select("*").eq("id", callback.from_user.id).execute()
+    res = supabase.table("users").select("*").eq("id", callback.from_user.id).execute()
 
-    if not user.data:
+    if not res.data:
         await callback.answer("Помилка профілю", show_alert=True)
         return
 
-    user = user.data[0]
+    user = res.data[0]
     balance = user.get("referral_balance", 0)
 
     if balance <= 0:
         await callback.answer(
-            "❌ Баланс порожній. Запрошуй друзів для заробітку!",
+            "❌ Баланс 0. Запрошуй друзів!",
             show_alert=True
         )
         return
 
-    # повідомлення адмінy (без Markdown — безпечно)
     try:
         await bot.send_message(
             chat_id=ADMIN_ID,
             text=(
                 "💰 ЗАЯВКА НА ВИВІД\n\n"
-                f"Користувач: {user.get('first_name')}\n"
+                f"👤 {user.get('first_name')}\n"
                 f"ID: {callback.from_user.id}\n"
-                f"Username: @{user.get('username')}\n"
+                f"@{user.get('username')}\n"
                 f"Баланс: {balance} ⭐"
             )
         )
 
-        await callback.message.answer(
-            "✅ Заявку відправлено. Очікуй відповіді!"
-        )
+        await callback.message.answer("✅ Заявка відправлена!")
 
     except Exception:
-        await callback.message.answer(
-            "⚠️ Не вдалося відправити заявку. Напиши в підтримку."
-        )
+        await callback.message.answer("⚠️ Помилка. Напиши в підтримку.")
 
     await callback.answer()
 
 
 # ---------------------------
-# SUPPORT COMMAND (опціонально)
+# SUPPORT
 # ---------------------------
 @router.message(Command("support"))
 async def support(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="📩 Написати підтримці",
-            url=f"https://t.me/{SUPPORT_BOT}"
-        )]
+        [
+            InlineKeyboardButton(
+                text="📩 Написати підтримці",
+                url=f"https://t.me/{SUPPORT_BOT}"
+            )
+        ]
     ])
 
     await message.answer(
-        "📩 Підтримка та співпраця\n\n"
-        "Якщо у тебе питання щодо бота, помилки або пропозиції — напиши нам.",
-        reply_markup=kb
+        "📩 <b>Підтримка та співпраця</b>\n\n"
+        "Є питання, помилки або пропозиції — напиши нам.",
+        reply_markup=kb,
+        parse_mode="HTML"
     )
