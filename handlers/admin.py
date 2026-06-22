@@ -21,7 +21,7 @@ async def admin_panel(message: Message):
     total_tasks = supabase.table("tasks").select("id", count="exact").execute().count
     
     await message.answer(
-        "⚙️ **Адмін-панель NetaNMT**\n\n"
+        "⚙️ Адмін-панель NetaNMT\n\n"
         f"👥 Всього користувачів: `{total_users}`\n"
         f"💎 З них Premium: `{premium_users}`\n"
         f"📚 Тестів у базі: `{total_tasks}`\n\n"
