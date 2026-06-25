@@ -1,3 +1,4 @@
+import html
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from aiogram.fsm.context import FSMContext
@@ -21,7 +22,7 @@ async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Авторські тести", callback_data="viewcat_author")],
+        [InlineKeyboardButton(text="💎 ... Авторські тести", callback_data="viewcat_author")],
         [InlineKeyboardButton(text="🔥 Зливи НМТ", callback_data="viewcat_leak")],
         [InlineKeyboardButton(text="📝 Пробні варіанти", callback_data="viewcat_mock")]
     ])
@@ -82,6 +83,7 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
         await callback.answer()
         return
 
+    # Захист від падіння, якщо в sub_category є підкреслення
     _, category, sub_category = callback.data.split("_", maxsplit=2)
     
     # Забираємо ОДНИМ запитом усі завдання цього варіанту
@@ -130,17 +132,21 @@ async def send_next_question_ui(message: Message, task: dict, index: int, total:
         
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
+    # Безпечно екрануємо текст, захищаючи від зламаних тегів HTML
+    clean_question = html.escape(task['question_text'])
+    clean_section = html.escape(task['section'])
+    
     text = (
-        f"📝 **Завдання {index + 1} з {total}**\n"
-        f"Розділ: #{task['section']}\n"
+        f"📝 <b>Завдання {index + 1} з {total}</b>\n"
+        f"Розділ: #{clean_section}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{task['question_text']}"
+        f"{clean_question}"
     )
     
     if edit:
-        await message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
-        await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+        await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 # 4. Обробка відповіді (ОПТИМІЗОВАНО)
@@ -177,30 +183,33 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
         await state.update_data(correct_count=correct_count)
         result_text = "🎉 Правильно!"
     else:
-        result_text = f"❌ Неправильно.\n\nПравильна відповідь: `{task['correct_answer']}`\n\n"
+        result_text = f"❌ Неправильно.\n\nПравильна відповідь: <code>{html.escape(task['correct_answer'])}</code>\n\n"
         if user["is_premium"]:
             if task.get("explanation"):
-                result_text += f"💡 Пояснення:\n{task['explanation']}"
+                result_text += f"💡 Пояснення:\n{html.escape(task['explanation'])}"
             else:
                 result_text += "💡 Адмін ще не додав пояснення до цього завдання."
         else:
             result_text += "🔒 Пояснення цієї помилки доступне тільки для Premium користувачів."
-            # Додаємо кнопку купівлі ПЕРШИМ рядком, якщо у користувача немає Premium
+            # Пропонуємо купити преміум прямо під помилкою
             buttons.append([InlineKeyboardButton(text="💎 Купити Premium (Пояснення)", callback_data="quiz_buy_premium")])
             
-    # Кнопка наступного кроку додається в будь-якому випадку
+    # Кнопка наступного кроку додається завжди
     buttons.append([InlineKeyboardButton(text="Наступне питання ➡️", callback_data="session_next_step")])
     next_kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
+    # Захищаємо старий текст повідомлення від помилок парсингу HTML
+    clean_old_text = html.escape(callback.message.text)
+    
     await callback.message.edit_text(
-        f"{callback.message.text}\n\n📊 Твій вибір: *{selected}*\n\n{result_text}", 
-        parse_mode="Markdown",
+        f"{clean_old_text}\n\n📊 Твій вибір: <b>{selected}</b>\n\n{result_text}", 
+        parse_mode="HTML",
         reply_markup=next_kb
     )
     await callback.answer()
 
 
-# Хендлер для обробки натискання кнопки "Купити Premium" прямо під час тесту
+# Обробка натискання кнопки "Купити Premium" під час тесту
 @router.callback_query(QuizSession.in_progress, F.data == "quiz_buy_premium")
 async def process_inline_buy_premium(callback: CallbackQuery, bot: Bot):
     prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)]
@@ -227,7 +236,6 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
     await state.update_data(current_index=next_index)
     
     if next_index < len(tasks):
-        # Оновлюємо повідомлення локальними даними з пам'яті
         await send_next_question_ui(callback.message, tasks[next_index], next_index, len(tasks), edit=True)
     else:
         correct_count = session_data.get("correct_count", 0)
@@ -235,12 +243,12 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
         success_pct = int((correct_count / len(tasks)) * 100) if tasks else 0
         
         await callback.message.edit_text(
-            f"🏁 ТЕСТ ЗАВЕРШЕНО!\n\n"
+            f"🏁 <b>ТЕСТ ЗАВЕРШЕНО!</b>\n\n"
             f"📊 Твій підсумковий результат:\n"
-            f"✅ Правильних відповідей: `{correct_count}` з `{len(tasks)}`\n"
-            f"📈 Успішність: `{success_pct}%`\n\n"
+            f"✅ Правильних відповідей: <code>{correct_count}</code> з <code>{len(tasks)}</code>\n"
+            f"📈 Успішність: <code>{success_pct}%</code>\n\n"
             f"👉 Напиши /quiz, щоб відкрити каталог та спробувати інший тест!",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
     await callback.answer()
 
