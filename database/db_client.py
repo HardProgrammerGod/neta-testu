@@ -4,7 +4,6 @@ from datetime import date
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
 async def get_or_create_user(tg_id: int, username: str, first_name: str):
     res = supabase.table("users").select("*").eq("id", tg_id).execute()
     today = str(date.today())
@@ -36,20 +35,20 @@ async def get_or_create_user(tg_id: int, username: str, first_name: str):
 
     return user
 
-
-async def get_random_task_by_ids(task_ids: list):
-    if not task_ids:
-        return None
-
-    res = supabase.table("tasks").select("*").in_("id", task_ids).execute()
+async def get_full_test_tasks(category: str, sub_category: str):
+    """Достает сразу весь пул вопросов для конкретного варианта за 1 запрос"""
+    res = supabase.table("tasks") \
+        .select("*") \
+        .eq("category", category) \
+        .eq("sub_category", sub_category) \
+        .order("id") \
+        .execute()
     return res.data
-
 
 async def decrease_test_limit(tg_id: int, current_left: int):
     supabase.table("users").update({
         "daily_tests_left": max(0, current_left - 1)
     }).eq("id", tg_id).execute()
-
 
 async def save_attempt(user_id: int, task_id: int, answer: str, is_correct: bool):
     supabase.table("user_attempts").insert({
