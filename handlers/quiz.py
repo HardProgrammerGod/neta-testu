@@ -170,6 +170,8 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     new_passed = user.get("total_tests_passed", 0) + 1
     supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", callback.from_user.id).execute()
     
+    buttons = []
+    
     if is_correct:
         correct_count += 1
         await state.update_data(correct_count=correct_count)
@@ -183,15 +185,33 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
                 result_text += "💡 Адмін ще не додав пояснення до цього завдання."
         else:
             result_text += "🔒 Пояснення цієї помилки доступне тільки для Premium користувачів."
+            # Додаємо кнопку купівлі ПЕРШИМ рядком, якщо у користувача немає Premium
+            buttons.append([InlineKeyboardButton(text="💎 Купити Premium (Пояснення)", callback_data="quiz_buy_premium")])
             
-    next_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Наступне питання ➡️", callback_data="session_next_step")]
-    ])
+    # Кнопка наступного кроку додається в будь-якому випадку
+    buttons.append([InlineKeyboardButton(text="Наступне питання ➡️", callback_data="session_next_step")])
+    next_kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     await callback.message.edit_text(
         f"{callback.message.text}\n\n📊 Твій вибір: *{selected}*\n\n{result_text}", 
         parse_mode="Markdown",
         reply_markup=next_kb
+    )
+    await callback.answer()
+
+
+# Хендлер для обробки натискання кнопки "Купити Premium" прямо під час тесту
+@router.callback_query(QuizSession.in_progress, F.data == "quiz_buy_premium")
+async def process_inline_buy_premium(callback: CallbackQuery, bot: Bot):
+    prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)]
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="💎 Активація Premium доступу",
+        description="Отримай повний безліміт на тести, унікальні авторські завдання та розбори помилок за 250 Telegram Stars!",
+        payload="premium_sub",
+        provider_token="",
+        currency="XTR",
+        prices=prices
     )
     await callback.answer()
 
