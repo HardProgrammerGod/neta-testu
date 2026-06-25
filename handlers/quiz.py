@@ -14,7 +14,7 @@ class QuizSession(StatesGroup):
 # 1. Головне меню вибору категорії
 @router.message(F.text == "/quiz")
 async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
-    await state.clear()  # Скидаємо старі сесії беззастережно
+    await state.clear()  # Очищуємо старі сесії перед стартом нового тесту
     
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Будь ласка, спочатку підпишись на наш канал!")
@@ -63,13 +63,13 @@ async def back_to_main(callback: CallbackQuery, bot: Bot, state: FSMContext):
     await callback.answer()
 
 
-# 3. Ініціалізація та старт обраного тесту
+# 3. Ініціалізація та старт обраного тесту (ОПТИМІЗОВАНО)
 @router.callback_query(F.data.startswith("startset_"))
 async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMContext):
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     
     if not user["is_premium"] and user["daily_tests_left"] <= 0:
-        prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)] # 250 Stars
+        prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)]
         await bot.send_invoice(
             chat_id=callback.message.chat.id,
             title="💎 Активація Premium доступу",
@@ -84,20 +84,27 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
 
     _, category, sub_category = callback.data.split("_")
     
-    res = supabase.table("tasks").select("id").eq("category", category).eq("sub_category", sub_category).order("id").execute()
+    # Забираємо ОДНИМ запитом усі завдання цього варіанту
+    res = supabase.table("tasks")\
+        .select("*")\
+        .eq("category", category)\
+        .eq("sub_category", sub_category)\
+        .order("id")\
+        .execute()
     
     if not res.data:
-        await callback.message.answer("❌ Сталася помилка завантаження структури тесту.")
+        await callback.message.answer("❌ Сталася помилка завантаження структури тесту або варіант порожній.")
         await callback.answer()
         return
         
-    task_ids = [item['id'] for item in res.data]
+    all_tasks = res.data
     
     if not user["is_premium"]:
         await decrease_test_limit(callback.from_user.id, user["daily_tests_left"])
         
+    # Зберігаємо всі завдання в пам'ять FSM кешу
     await state.update_data(
-        task_ids=task_ids,
+        tasks=all_tasks,
         current_index=0,
         correct_count=0,
         category=category,
@@ -105,22 +112,18 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     )
     await state.set_state(QuizSession.in_progress)
     
-    # Видаляємо старе меню вибору, щоб очистити інтерфейс
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-    # Надсилаємо перше питання як НОВЕ повідомлення
-    await send_next_question_ui(callback.message, task_ids[0], 0, len(task_ids), edit=False)
+    # Передаємо перший об'єкт таски безпосередньо з локального масиву
+    await send_next_question_ui(callback.message, all_tasks[0], 0, len(all_tasks), edit=False)
     await callback.answer()
 
 
-async def send_next_question_ui(message: Message, task_id: int, index: int, total: int, edit: bool = False):
-    """Швидко дістає одне питання з БД по ID та рендерить або редагує повідомлення."""
-    res = supabase.table("tasks").select("*").eq("id", task_id).execute()
-    task = res.data[0]
-    
+async def send_next_question_ui(message: Message, task: dict, index: int, total: int, edit: bool = False):
+    """Генерує інтерфейс питання. Працює локально, не навантажує мережу."""
     buttons = []
     for opt in task["options"]:
         buttons.append([InlineKeyboardButton(text=opt, callback_data=f"select_{opt[0]}")])
@@ -134,39 +137,36 @@ async def send_next_question_ui(message: Message, task_id: int, index: int, tota
         f"{task['question_text']}"
     )
     
-    # Якщо edit=True — редагуємо поточне повідомлення (заощаджує простір і RAM)
     if edit:
         await message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     else:
         await message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
 
-# 4. Обробка відповіді користувача всередині активної сесії
+# 4. Обробка відповіді (ОПТИМІЗОВАНО)
 @router.callback_query(QuizSession.in_progress, F.data.startswith("select_"))
 async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     selected = callback.data.split("_")[1]
     
     session_data = await state.get_data()
-    task_ids = session_data.get("task_ids", [])
+    tasks = session_data.get("tasks", [])
     current_index = session_data.get("current_index", 0)
     correct_count = session_data.get("correct_count", 0)
     
-    if not task_ids or current_index >= len(task_ids):
+    if not tasks or current_index >= len(tasks):
         await state.clear()
-        await callback.answer("❌ Сесія тестування застаріла.")
+        await callback.answer("❌ Сесія тестування застаріла.", show_alert=True)
         return
         
-    current_task_id = task_ids[current_index]
-    
-    task = supabase.table("tasks").select("*").eq("id", current_task_id).execute().data[0]
+    task = tasks[current_index]
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     
     is_correct = (selected == task["correct_answer"])
     
-    # ВИПРАВЛЕНО: викликаємо збереження спроби строго ОДИН раз
-    await save_attempt(callback.from_user.id, current_task_id, selected, is_correct)
+    # Зберігаємо спробу в БД
+    await save_attempt(callback.from_user.id, task["id"], selected, is_correct)
     
-    # Оновлюємо кількість пройдених тестів у БД (+1)
+    # Оновлюємо загальний лічильник пройдених тестів користувача (+1)
     new_passed = user.get("total_tests_passed", 0) + 1
     supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", callback.from_user.id).execute()
     
@@ -184,12 +184,10 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
         else:
             result_text += "🔒 Пояснення цієї помилки доступне тільки для Premium користувачів."
             
-    # Додаємо inline-кнопку для переходу до наступного кроку, щоб зафіксувати результат
     next_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Наступне питання ➡️", callback_data="session_next_step")]
     ])
     
-    # Редагуємо текст, виводячи результат
     await callback.message.edit_text(
         f"{callback.message.text}\n\n📊 Твій вибір: *{selected}*\n\n{result_text}", 
         parse_mode="Markdown",
@@ -198,29 +196,28 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# 5. Перехід до наступного питання по кнопці (Захист від спаму і багів FSM)
+# 5. Крок вперед (Безпечний перехід)
 @router.callback_query(QuizSession.in_progress, F.data == "session_next_step")
 async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
     session_data = await state.get_data()
-    task_ids = session_data.get("task_ids", [])
+    tasks = session_data.get("tasks", [])
     current_index = session_data.get("current_index", 0)
-    correct_count = session_data.get("correct_count", 0)
     
     next_index = current_index + 1
     await state.update_data(current_index=next_index)
     
-    if next_index < len(task_ids):
-        # Редагуємо ЦЕ Ж повідомлення під нове питання, замінюючи текст та inline-кнопки
-        await send_next_question_ui(callback.message, task_ids[next_index], next_index, len(task_ids), edit=True)
+    if next_index < len(tasks):
+        # Оновлюємо повідомлення локальними даними з пам'яті
+        await send_next_question_ui(callback.message, tasks[next_index], next_index, len(tasks), edit=True)
     else:
-        # Тест повністю завершено
+        correct_count = session_data.get("correct_count", 0)
         await state.clear()
-        success_pct = int((correct_count / len(task_ids)) * 100)
+        success_pct = int((correct_count / len(tasks)) * 100) if tasks else 0
         
         await callback.message.edit_text(
             f"🏁 ТЕСТ ЗАВЕРШЕНО!\n\n"
             f"📊 Твій підсумковий результат:\n"
-            f"✅ Правильних відповідей: `{correct_count}` з `{len(task_ids)}`\n"
+            f"✅ Правильних відповідей: `{correct_count}` з `{len(tasks)}`\n"
             f"📈 Успішність: `{success_pct}%`\n\n"
             f"👉 Напиши /quiz, щоб відкрити каталог та спробувати інший тест!",
             parse_mode="Markdown"
@@ -228,7 +225,7 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- Логіка оплати 250 Telegram Stars (XTR) ---
+# --- Системні хендлери оплати Stars ---
 @router.pre_checkout_query()
 async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
