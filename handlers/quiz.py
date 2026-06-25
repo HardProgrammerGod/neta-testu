@@ -82,7 +82,7 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
         await callback.answer()
         return
 
-    _, category, sub_category = callback.data.split("_")
+    _, category, sub_category = callback.data.split("_", maxsplit=2)
     
     # Забираємо ОДНИМ запитом усі завдання цього варіанту
     res = supabase.table("tasks")\
