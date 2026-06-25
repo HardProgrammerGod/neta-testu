@@ -1,7 +1,6 @@
 import csv
 import io
-import asyncio
-from aiogram import Router, F, Bot
+from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.filters import Command
 from config import ADMIN_ID
@@ -12,18 +11,19 @@ router = Router()
 
 @router.message(Command("admin"), F.from_user.id == ADMIN_ID)
 async def admin_panel(message: Message):
+    # Використовуємо head-запит для точного і швидкого підрахунку кількості рядків
     users = supabase.table("users").select("id", count="exact").execute().count
     tasks = supabase.table("tasks").select("id", count="exact").execute().count
 
     await message.answer(
-        f"⚙️ Admin\n👥 {users}\n📚 {tasks}\n\n📥 CSV upload ready"
+        f"⚙️ Admin Panel\n👥 Користувачі: {users}\n📚 Питання в базі: {tasks}\n\n📥 Надішли мені .csv файл для імпорту нових завдань."
     )
 
 
 @router.message(F.document, F.from_user.id == ADMIN_ID)
 async def upload_csv(message: Message):
     if not message.document.file_name.endswith(".csv"):
-        await message.answer("❌ Тільки CSV")
+        await message.answer("❌ Помилка: підтримуються тільки файли з розширенням .csv")
         return
 
     file = await message.bot.get_file(message.document.file_id)
@@ -32,11 +32,11 @@ async def upload_csv(message: Message):
     csv_file = io.TextIOWrapper(content, encoding="utf-8")
     reader = csv.DictReader(csv_file)
 
-    tasks = []
+    tasks_chunk = []
     errors = 0
+    total_uploaded = 0
 
-    for i, row in enumerate(reader):
-
+    for row in reader:
         try:
             options_raw = row.get("options", "")
 
@@ -50,7 +50,7 @@ async def upload_csv(message: Message):
                 errors += 1
                 continue
 
-            tasks.append({
+            tasks_chunk.append({
                 "category": row.get("category", "author"),
                 "sub_category": row.get("sub_category", "general"),
                 "section": row.get("section", "general"),
@@ -60,16 +60,21 @@ async def upload_csv(message: Message):
                 "explanation": row.get("explanation", "")
             })
 
-        except:
+            # Пакетне завантаження пачками по 500 штук для економії пам'яті
+            if len(tasks_chunk) >= 500:
+                supabase.table("tasks").insert(tasks_chunk).execute()
+                total_uploaded += len(tasks_chunk)
+                tasks_chunk.clear()
+
+        except Exception:
             errors += 1
             continue
 
-        if len(tasks) >= 500:
-            break
-
-    if tasks:
-        supabase.table("tasks").insert(tasks).execute()
+    # Завантажуємо залишок, якщо він менший за 500 рядків
+    if tasks_chunk:
+        supabase.table("tasks").insert(tasks_chunk).execute()
+        total_uploaded += len(tasks_chunk)
 
     await message.answer(
-        f"✅ Завантажено: {len(tasks)}\n❌ Помилки: {errors}"
+        f"✅ Успішно імпортовано питань: {total_uploaded}\n❌ Рядочків з помилками: {errors}"
     )
