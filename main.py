@@ -11,6 +11,7 @@ dp.include_router(start.router)
 dp.include_router(quiz.router)
 dp.include_router(admin.router)
 dp.include_router(profile.router)
+router.callback_query.middleware(ThrottlingMiddleware())
 
 async def handle_ping(request):
     return web.Response(text="NetaNMT is actively running!")
