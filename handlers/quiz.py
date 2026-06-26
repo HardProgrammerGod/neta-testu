@@ -12,28 +12,39 @@ class QuizSession(StatesGroup):
     in_progress = State()
 
 
+# --- ФУНКЦІЯ СТВОРЕННЯ ПРОГРЕС-БАРУ (ВІЗУАЛ) ---
+def generate_progress_bar(current_index: int, total: int) -> str:
+    """Генерує красивий динамічний рядок прогресу іспиту."""
+    # Довжина шкали — 10 символів
+    bar_length = 10
+    progress = int((current_index / total) * bar_length) if total > 0 else 0
+    
+    # 🟦 — пройдено, ⬜ — залишилось
+    bar = "🟦" * progress + "⬜" * (bar_length - progress)
+    return f"<code>{bar}</code> ({current_index}/{total})"
+
+
 # 1. Головне меню вибору категорії
 @router.message(F.text == "/quiz")
 async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
-    await state.clear()  # Очищуємо старі сесії перед стартом нового тесту
+    await state.clear()  # Очищуємо старі сесії
     
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Будь ласка, спочатку підпишись на наш канал!")
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 ... Авторські тести", callback_data="viewcat_author")],
+        [InlineKeyboardButton(text="💎 Авторські тести", callback_data="viewcat_author")],
         [InlineKeyboardButton(text="🔥 Зливи НМТ", callback_data="viewcat_leak")],
         [InlineKeyboardButton(text="📝 Пробні варіанти", callback_data="viewcat_mock")]
     ])
-    await message.answer("🎯 Вибери категорію тестування:", reply_markup=kb)
+    await message.answer("🎯 <b>Вибери категорію тестування:</b>", reply_markup=kb, parse_mode="HTML")
 
 
 # 2. Динамічне підменю тестів
 @router.callback_query(F.data.startswith("viewcat_"))
 async def show_subcategories(callback: CallbackQuery):
     category = callback.data.split("_")[1]
-    
     res = supabase.table("tasks").select("sub_category").eq("category", category).execute()
     
     if not res.data:
@@ -41,7 +52,6 @@ async def show_subcategories(callback: CallbackQuery):
         return
     
     sub_categories = sorted(list(set(item['sub_category'] for item in res.data)))
-    
     buttons = []
     for sub in sub_categories:
         display_name = sub.replace("_", " ").capitalize()
@@ -50,7 +60,7 @@ async def show_subcategories(callback: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main_menu")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    await callback.message.edit_text("📅 Вибери конкретний варіант/тест із бази:", reply_markup=kb)
+    await callback.message.edit_text("📅 <b>Вибери конкретний варіант/тест із бази:</b>", reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -64,17 +74,18 @@ async def back_to_main(callback: CallbackQuery, bot: Bot, state: FSMContext):
     await callback.answer()
 
 
-# 3. Ініціалізація та старт обраного тесту (ОПТИМІЗОВАНО)
+# 3. Ініціалізація та старт обраного тесту
 @router.callback_query(F.data.startswith("startset_"))
 async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMContext):
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     
+    # ПЕРЕВІРКА ЛІМІТІВ (Маркетинговий прогрів на покупку Stars)
     if not user["is_premium"] and user["daily_tests_left"] <= 0:
         prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)]
         await bot.send_invoice(
             chat_id=callback.message.chat.id,
             title="💎 Активація Premium доступу",
-            description="Отримай повний безліміт на тести, унікальні авторські завдання та розбори помилок за 250 Telegram Stars!",
+            description="Закінчилися безкоштовні спроби! Отримай повний безліміт на тести, унікальні завдання та розбори помилок за 250 Telegram Stars!",
             payload="premium_sub",
             provider_token="",
             currency="XTR",
@@ -83,10 +94,9 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
         await callback.answer()
         return
 
-    # Захист від падіння, якщо в sub_category є підкреслення
     _, category, sub_category = callback.data.split("_", maxsplit=2)
     
-    # Забираємо ОДНИМ запитом усі завдання цього варіанту
+    # ОДИН запит до БД для економії пам'яті
     res = supabase.table("tasks")\
         .select("*")\
         .eq("category", category)\
@@ -104,7 +114,6 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     if not user["is_premium"]:
         await decrease_test_limit(callback.from_user.id, user["daily_tests_left"])
         
-    # Зберігаємо всі завдання в пам'ять FSM кешу
     await state.update_data(
         tasks=all_tasks,
         current_index=0,
@@ -119,26 +128,27 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     except Exception:
         pass
 
-    # Передаємо перший об'єкт таски безпосередньо з локального масиву
     await send_next_question_ui(callback.message, all_tasks[0], 0, len(all_tasks), edit=False)
     await callback.answer()
 
 
 async def send_next_question_ui(message: Message, task: dict, index: int, total: int, edit: bool = False):
-    """Генерує інтерфейс питання. Працює локально, не навантажує мережу."""
+    """Генерує інтерфейс питання. Додано динамічний PROGRESS BAR."""
     buttons = []
     for opt in task["options"]:
         buttons.append([InlineKeyboardButton(text=opt, callback_data=f"select_{opt[0]}")])
         
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    # Безпечно екрануємо текст, захищаючи від зламаних тегів HTML
     clean_question = html.escape(task['question_text'])
-    clean_section = html.escape(task['section'])
+    clean_section = html.escape(task['section'].upper())
+    
+    progress_bar = generate_progress_bar(index + 1, total)
     
     text = (
-        f"📝 <b>Завдання {index + 1} з {total}</b>\n"
-        f"Розділ: #{clean_section}\n"
+        f"📝 <b>ЗАВДАННЯ {index + 1} з {total}</b>\n"
+        f"Прогрес: {progress_bar}\n"
+        f"Розділ: <code>#{clean_section}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{clean_question}"
     )
@@ -149,7 +159,7 @@ async def send_next_question_ui(message: Message, task: dict, index: int, total:
         await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-# 4. Обробка відповіді (ОПТИМІЗОВАНО)
+# 4. Обробка відповіді (МАРКЕТИНГОВИЙ ПРОГРІВ PREMIUM & FOMO)
 @router.callback_query(QuizSession.in_progress, F.data.startswith("select_"))
 async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     selected = callback.data.split("_")[1]
@@ -169,10 +179,10 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     
     is_correct = (selected == task["correct_answer"])
     
-    # Зберігаємо спробу в БД
+    # Запис у БД
     await save_attempt(callback.from_user.id, task["id"], selected, is_correct)
     
-    # Оновлюємо загальний лічильник пройдених тестів користувача (+1)
+    # Швидкий інкремент лічильника пройдених тестів
     new_passed = user.get("total_tests_passed", 0) + 1
     supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", callback.from_user.id).execute()
     
@@ -181,35 +191,54 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     if is_correct:
         correct_count += 1
         await state.update_data(correct_count=correct_count)
-        result_text = "🎉 Правильно!"
+        result_text = "🎉 <b>Правильно! Чудова робота.</b>"
     else:
-        result_text = f"❌ Неправильно.\n\nПравильна відповідь: <code>{html.escape(task['correct_answer'])}</code>\n\n"
+        result_text = f"❌ <b>Неправильно.</b>\n\nПравильна відповідь: <code>{html.escape(task['correct_answer'])}</code>\n\n"
+        
+        # --- МАРКЕТИНГОВИЙ ХІД (Байт на покупку преміуму) ---
         if user["is_premium"]:
             if task.get("explanation"):
-                result_text += f"💡 Пояснення:\n{html.escape(task['explanation'])}"
+                result_text += f"💡 <b>Пояснення помилки:</b>\n{html.escape(task['explanation'])}"
             else:
-                result_text += "💡 Адмін ще не додав пояснення до цього завдання."
+                result_text += "💡 Адмін ще не додав розгорнуте пояснення до цього завдання."
         else:
-            result_text += "🔒 Пояснення цієї помилки доступне тільки для Premium користувачів."
-            # Пропонуємо купити преміум прямо під помилкою
-            buttons.append([InlineKeyboardButton(text="💎 Купити Premium (Пояснення)", callback_data="quiz_buy_premium")])
+            # Якщо преміуму немає, показуємо обрізаний тизер пояснення (якщо воно є в базі)
+            if task.get("explanation"):
+                full_exp = task['explanation']
+                # Беремо перші 45 символів як приманку
+                teaser = full_exp[:45] + "..." if len(full_exp) > 45 else full_exp
+                result_text += (
+                    f"💡 <b>Пояснення помилки (Тизер):</b>\n<i>{html.escape(teaser)}</i>\n\n"
+                    f"🔒 <b>Повний аналітика правила доступна лише Premium учням!</b> "
+                    f"Не втрачай бали на реальному НМТ через прості правила."
+                )
+            else:
+                result_text += "🔒 <b>Пояснення цієї помилки доступне тільки для Premium користувачів.</b>"
             
-    # Кнопка наступного кроку додається завжди
+            # Додаємо кнопку покупки ПЕРШОЮ
+            buttons.append([InlineKeyboardButton(text="💎 Відкрити пояснення (250 ⭐)", callback_data="quiz_buy_premium")])
+            
+    # Кнопка переходу
     buttons.append([InlineKeyboardButton(text="Наступне питання ➡️", callback_data="session_next_step")])
     next_kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    # Захищаємо старий текст повідомлення від помилок парсингу HTML
-    clean_old_text = html.escape(callback.message.text)
-    
+    # Екрануємо старе питання, щоб уникнути конфліктів HTML
+    clean_old_text = html.escape(callback.message.text).split("━━━━━━━━━━━━━━━━━━━━")[1]
+    progress_bar = generate_progress_bar(current_index + 1, len(tasks))
+
     await callback.message.edit_text(
-        f"{clean_old_text}\n\n📊 Твій вибір: <b>{selected}</b>\n\n{result_text}", 
+        f"📝 <b>ПИТАННЯ {current_index + 1} ОПРАЦЬОВАНО</b>\n"
+        f"Прогрес: {progress_bar}\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+        f"{clean_old_text}\n\n"
+        f"📊 Твій вибір: <b>{selected}</b>\n\n"
+        f"{result_text}", 
         parse_mode="HTML",
         reply_markup=next_kb
     )
     await callback.answer()
 
 
-# Обробка натискання кнопки "Купити Premium" під час тесту
 @router.callback_query(QuizSession.in_progress, F.data == "quiz_buy_premium")
 async def process_inline_buy_premium(callback: CallbackQuery, bot: Bot):
     prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)]
@@ -242,16 +271,25 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         success_pct = int((correct_count / len(tasks)) * 100) if tasks else 0
         
+        # Визначаємо фінальний вердикт за шкалою успішності
+        if success_pct >= 90:
+            rating = "🔥 Ідеальний результат! Ти повністю готовий до НМТ."
+        elif success_pct >= 70:
+            rating = "⚡️ Гарний результат, але є слабкі місця. Повтори правила!"
+        else:
+            rating = "⚠️ Треба підтягнути знання. Premium розбори допоможуть закрити прогалини."
+
         await callback.message.edit_text(
-            f"🏁 <b>ТЕСТ ЗАВЕРШЕНО!</b>\n\n"
-            f"📊 Твій підсумковий результат:\n"
+            f"🏁 <b>ТЕСТ ЗАВЕРШЕНО!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 <b>Твій підсумковий результат:</b>\n"
             f"✅ Правильних відповідей: <code>{correct_count}</code> з <code>{len(tasks)}</code>\n"
-            f"📈 Успішність: <code>{success_pct}%</code>\n\n"
+            f"📈 Успішність: <b><code>{success_pct}%</code></b>\n\n"
+            f"📋 Вердикт: <i>{rating}</i>\n\n"
             f"👉 Напиши /quiz, щоб відкрити каталог та спробувати інший тест!",
             parse_mode="HTML"
         )
     await callback.answer()
-
 
 # --- Системні хендлери оплати Stars ---
 @router.pre_checkout_query()
