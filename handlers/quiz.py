@@ -220,7 +220,7 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext, bot:
     user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     is_correct = (selected == task["correct_answer"])
     
-    await save_attempt(user_id, task["id"], selected, is_correct)
+    # await save_attempt(user_id, task["id"], selected, is_correct)
     
     new_passed = user.get("total_tests_passed", 0) + 1
     supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", user_id).execute()
