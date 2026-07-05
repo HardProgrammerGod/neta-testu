@@ -1,4 +1,5 @@
 import html
+import asyncio
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from aiogram.fsm.context import FSMContext
@@ -12,14 +13,37 @@ class QuizSession(StatesGroup):
     in_progress = State()
 
 
+# --- ХРАНИЛИЩЕ ДЛЯ ОТЛОЖЕННЫХ НАПОМИНАНИЙ (БЕЗ БД, ЭКОНОМИЯ RAM) ---
+# Ключ: user_id, Значение: asyncio.Task
+ACTIVE_REMINDERS = {}
+
+async def schedule_quiz_reminder(user_id: int, bot: Bot, delay_seconds: int, text: str):
+    """Безопасная фоновая задача для отправки напоминания."""
+    try:
+        await asyncio.sleep(delay_seconds)
+        # Если задача не была отменена кодом — отправляем
+        await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+    except asyncio.CancelledError:
+        # Задача была успешно перехвачена и отменена, когда юзер ответил — ничего не делаем
+        pass
+    except Exception:
+        pass
+    finally:
+        # Чистим за собой ссылку на задачу в словаре
+        ACTIVE_REMINDERS.pop(user_id, None)
+
+def cancel_user_reminder(user_id: int):
+    """Сбрасывает старый таймер, чтобы юзера не засыпало уведомлениями."""
+    old_task = ACTIVE_REMINDERS.get(user_id)
+    if old_task and not old_task.done():
+        old_task.cancel()
+    ACTIVE_REMINDERS.pop(user_id, None)
+
+
 # --- ФУНКЦІЯ СТВОРЕННЯ ПРОГРЕС-БАРУ (ВІЗУАЛ) ---
 def generate_progress_bar(current_index: int, total: int) -> str:
-    """Генерує красивий динамічний рядок прогресу іспиту."""
-    # Довжина шкали — 10 символів
     bar_length = 10
     progress = int((current_index / total) * bar_length) if total > 0 else 0
-    
-    # 🟦 — пройдено, ⬜ — залишилось
     bar = "🟦" * progress + "⬜" * (bar_length - progress)
     return f"<code>{bar}</code> ({current_index}/{total})"
 
@@ -27,7 +51,8 @@ def generate_progress_bar(current_index: int, total: int) -> str:
 # 1. Головне меню вибору категорії
 @router.message(F.text == "/quiz")
 async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
-    await state.clear()  # Очищуємо старі сесії
+    await state.clear()
+    cancel_user_reminder(message.from_user.id) # Сброс при входе в меню
     
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Будь ласка, спочатку підпишись на наш канал!")
@@ -77,9 +102,9 @@ async def back_to_main(callback: CallbackQuery, bot: Bot, state: FSMContext):
 # 3. Ініціалізація та старт обраного тесту
 @router.callback_query(F.data.startswith("startset_"))
 async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMContext):
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    user_id = callback.from_user.id
+    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     
-    # ПЕРЕВІРКА ЛІМІТІВ (Маркетинговий прогрів на покупку Stars)
     if not user["is_premium"] and user["daily_tests_left"] <= 0:
         prices = [LabeledPrice(label="Premium допуск (250 Stars)", amount=250)]
         await bot.send_invoice(
@@ -96,7 +121,6 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
 
     _, category, sub_category = callback.data.split("_", maxsplit=2)
     
-    # ОДИН запит до БД для економії пам'яті
     res = supabase.table("tasks")\
         .select("*")\
         .eq("category", category)\
@@ -112,7 +136,7 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     all_tasks = res.data
     
     if not user["is_premium"]:
-        await decrease_test_limit(callback.from_user.id, user["daily_tests_left"])
+        await decrease_test_limit(user_id, user["daily_tests_left"])
         
     await state.update_data(
         tasks=all_tasks,
@@ -122,6 +146,18 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
         sub_category=sub_category
     )
     await state.set_state(QuizSession.in_progress)
+    
+    # 🧠 ПСИХОЛОГИЧЕСКИЙ ТРИГГЕР НАПОМИНАНИЯ (Запускаем фоновое отложенное напоминание)
+    cancel_user_reminder(user_id) # Удаляем старое, если было
+    reminder_text = (
+        "⏳ <b>Ти зупинився на півшляху!</b>\n"
+        "Твій поточний тест НМТ все ще відкритий. Інші абітурієнти зараз проходять завдання та обганяють тебе в рейтингу. "
+        "Повернись і заверши розпочате! Натисни /quiz"
+    )
+    # Напоминание сработает через 20 минут (1200 секунд), если юзер забросит тест
+    ACTIVE_REMINDERS[user_id] = asyncio.create_task(
+        schedule_quiz_reminder(user_id, bot, 1200, reminder_text)
+    )
     
     try:
         await callback.message.delete()
@@ -133,16 +169,13 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
 
 
 async def send_next_question_ui(message: Message, task: dict, index: int, total: int, edit: bool = False):
-    """Генерує інтерфейс питання. Додано динамічний PROGRESS BAR."""
     buttons = []
     for opt in task["options"]:
         buttons.append([InlineKeyboardButton(text=opt, callback_data=f"select_{opt[0]}")])
         
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
     clean_question = html.escape(task['question_text'])
     clean_section = html.escape(task['section'].upper())
-    
     progress_bar = generate_progress_bar(index + 1, total)
     
     text = (
@@ -159,10 +192,18 @@ async def send_next_question_ui(message: Message, task: dict, index: int, total:
         await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-# 4. Обробка відповіді (МАРКЕТИНГОВИЙ ПРОГРІВ PREMIUM & FOMO)
+# 4. Обробка відповіді
 @router.callback_query(QuizSession.in_progress, F.data.startswith("select_"))
-async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
+async def handle_session_answer(callback: CallbackQuery, state: FSMContext, bot: Bot):
     selected = callback.data.split("_")[1]
+    user_id = callback.from_user.id
+    
+    # Продлеваем / обновляем наше отложенное напоминание еще на 20 минут, так как юзер активен!
+    cancel_user_reminder(user_id)
+    reminder_text = "🎯 <b>Твій тест чекає!</b> Ти відволікся, але регулярність — це запорука 190+ балів на НМТ. Закінчи тест прямо зараз! Натисни /quiz"
+    ACTIVE_REMINDERS[user_id] = asyncio.create_task(
+        schedule_quiz_reminder(user_id, bot, 1200, reminder_text)
+    )
     
     session_data = await state.get_data()
     tasks = session_data.get("tasks", [])
@@ -170,21 +211,19 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     correct_count = session_data.get("correct_count", 0)
     
     if not tasks or current_index >= len(tasks):
+        cancel_user_reminder(user_id)
         await state.clear()
         await callback.answer("❌ Сесія тестування застаріла.", show_alert=True)
         return
         
     task = tasks[current_index]
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-    
+    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     is_correct = (selected == task["correct_answer"])
     
-    # Запис у БД
-    await save_attempt(callback.from_user.id, task["id"], selected, is_correct)
+    await save_attempt(user_id, task["id"], selected, is_correct)
     
-    # Швидкий інкремент лічильника пройдених тестів
     new_passed = user.get("total_tests_passed", 0) + 1
-    supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", callback.from_user.id).execute()
+    supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", user_id).execute()
     
     buttons = []
     
@@ -195,34 +234,28 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext):
     else:
         result_text = f"❌ <b>Неправильно.</b>\n\nПравильна відповідь: <code>{html.escape(task['correct_answer'])}</code>\n\n"
         
-        # --- МАРКЕТИНГОВИЙ ХІД (Байт на покупку преміуму) ---
         if user["is_premium"]:
             if task.get("explanation"):
                 result_text += f"💡 <b>Пояснення помилки:</b>\n{html.escape(task['explanation'])}"
             else:
                 result_text += "💡 Адмін ще не додав розгорнуте пояснення до цього завдання."
         else:
-            # Якщо преміуму немає, показуємо обрізаний тизер пояснення (якщо воно є в базі)
             if task.get("explanation"):
                 full_exp = task['explanation']
-                # Беремо перші 45 символів як приманку
                 teaser = full_exp[:45] + "..." if len(full_exp) > 45 else full_exp
                 result_text += (
                     f"💡 <b>Пояснення помилки (Тизер):</b>\n<i>{html.escape(teaser)}</i>\n\n"
-                    f"🔒 <b>Повний аналітика правила доступна лише Premium учням!</b> "
-                    f"Не втрачай бали на реальному НМТ через прості правила."
+                    f"🔒 <b>Повний розбір правила доступний лише Premium учням!</b> "
+                    f"Не втрачай бали на реальному НМТ через прості помилки."
                 )
             else:
                 result_text += "🔒 <b>Пояснення цієї помилки доступне тільки для Premium користувачів.</b>"
             
-            # Додаємо кнопку покупки ПЕРШОЮ
             buttons.append([InlineKeyboardButton(text="💎 Відкрити пояснення (250 ⭐)", callback_data="quiz_buy_premium")])
             
-    # Кнопка переходу
     buttons.append([InlineKeyboardButton(text="Наступне питання ➡️", callback_data="session_next_step")])
     next_kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    # Екрануємо старе питання, щоб уникнути конфліктів HTML
     clean_old_text = html.escape(callback.message.text).split("━━━━━━━━━━━━━━━━━━━━")[1]
     progress_bar = generate_progress_bar(current_index + 1, len(tasks))
 
@@ -256,7 +289,8 @@ async def process_inline_buy_premium(callback: CallbackQuery, bot: Bot):
 
 # 5. Крок вперед (Безпечний перехід)
 @router.callback_query(QuizSession.in_progress, F.data == "session_next_step")
-async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
+async def process_next_step_click(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    user_id = callback.from_user.id
     session_data = await state.get_data()
     tasks = session_data.get("tasks", [])
     current_index = session_data.get("current_index", 0)
@@ -267,11 +301,13 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
     if next_index < len(tasks):
         await send_next_question_ui(callback.message, tasks[next_index], next_index, len(tasks), edit=True)
     else:
+        # ТЕСТ ПОЛНОСТЬЮ ЗАВЕРШЕН — Отменяем любые напоминания квиза! Юзер молодец.
+        cancel_user_reminder(user_id)
+        
         correct_count = session_data.get("correct_count", 0)
         await state.clear()
         success_pct = int((correct_count / len(tasks)) * 100) if tasks else 0
         
-        # Визначаємо фінальний вердикт за шкалою успішності
         if success_pct >= 90:
             rating = "🔥 Ідеальний результат! Ти повністю готовий до НМТ."
         elif success_pct >= 70:
@@ -289,7 +325,20 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext):
             f"👉 Напиши /quiz, щоб відкрити каталог та спробувати інший тест!",
             parse_mode="HTML"
         )
+        
+        # 🧠 ПСИХОЛОГИЧЕСКИЙ ТРИГГЕР НА ПОДДЕРЖАНИЕ СЕРИИ (Уведомление через 8 часов)
+        # Напоминаем вернуться вечером или на следующий день, играя на чувстве дисциплины
+        streak_reminder = (
+            "🌟 <b>Твій прогрес під загрозою!</b>\n"
+            "Пам'ятаєш свій останній результат? Щоб знання перейшли в довготривалу пам'ять, потрібно повторити практику. "
+            "Твої щоденні безкоштовні тести вже оновилися. Не переривай серію занять! Натисни /quiz"
+        )
+        ACTIVE_REMINDERS[user_id] = asyncio.create_task(
+            schedule_quiz_reminder(user_id, bot, 28800, streak_reminder) # 8 часов = 28800 сек
+        )
+
     await callback.answer()
+
 
 # --- Системні хендлери оплати Stars ---
 @router.pre_checkout_query()
