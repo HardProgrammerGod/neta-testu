@@ -4,7 +4,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from database.db_client import get_or_create_user, decrease_test_limit, save_attempt, supabase
+from database.db_client import get_or_create_user, decrease_test_limit, supabase
 from handlers.start import check_subscription
 
 router = Router()
@@ -14,30 +14,28 @@ class QuizSession(StatesGroup):
 
 
 # --- ХРАНИЛИЩЕ ДЛЯ ОТЛОЖЕННЫХ НАПОМИНАНИЙ (БЕЗ БД, ЭКОНОМИЯ RAM) ---
-# Ключ: user_id, Значение: asyncio.Task
 ACTIVE_REMINDERS = {}
 
 async def schedule_quiz_reminder(user_id: int, bot: Bot, delay_seconds: int, text: str):
-    """Безопасная фоновая задача для отправки напоминания."""
+    """Безпечна фонова задача для відправки нагадування."""
     try:
         await asyncio.sleep(delay_seconds)
-        # Если задача не была отменена кодом — отправляем
         await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
     except asyncio.CancelledError:
-        # Задача была успешно перехвачена и отменена, когда юзер ответил — ничего не делаем
+        # Задача була успішно скасована кодом — пам'ять вивільняється
         pass
     except Exception:
         pass
     finally:
-        # Чистим за собой ссылку на задачу в словаре
-        ACTIVE_REMINDERS.pop(user_id, None)
+        # Обов'язково чистимо за собою посилання, щоб не було Memory Leak
+        if ACTIVE_REMINDERS.get(user_id) == asyncio.current_task():
+            ACTIVE_REMINDERS.pop(user_id, None)
 
 def cancel_user_reminder(user_id: int):
-    """Сбрасывает старый таймер, чтобы юзера не засыпало уведомлениями."""
-    old_task = ACTIVE_REMINDERS.get(user_id)
+    """Скидає старий таймер і повністю вбиває його в asyncio loop."""
+    old_task = ACTIVE_REMINDERS.pop(user_id, None)
     if old_task and not old_task.done():
         old_task.cancel()
-    ACTIVE_REMINDERS.pop(user_id, None)
 
 
 # --- ФУНКЦІЯ СТВОРЕННЯ ПРОГРЕС-БАРУ (ВІЗУАЛ) ---
@@ -52,7 +50,7 @@ def generate_progress_bar(current_index: int, total: int) -> str:
 @router.message(F.text == "/quiz")
 async def start_quiz_menu(message: Message, bot: Bot, state: FSMContext):
     await state.clear()
-    cancel_user_reminder(message.from_user.id) # Сброс при входе в меню
+    cancel_user_reminder(message.from_user.id) 
     
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Будь ласка, спочатку підпишись на наш канал!")
@@ -122,7 +120,7 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
     _, category, sub_category = callback.data.split("_", maxsplit=2)
     
     res = supabase.table("tasks")\
-        .select("*")\
+        .select("id", "question_text", "options", "correct_answer", "explanation", "section")\
         .eq("category", category)\
         .eq("sub_category", sub_category)\
         .order("id")\
@@ -143,32 +141,31 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
         current_index=0,
         correct_count=0,
         category=category,
-        sub_category=sub_category
+        sub_category=sub_category,
+        is_premium=user["is_premium"] # Кешуємо статус преміуму в FSM, щоб не смикати БД кожне питання
     )
     await state.set_state(QuizSession.in_progress)
-    
-    # 🧠 ПСИХОЛОГИЧЕСКИЙ ТРИГГЕР НАПОМИНАНИЯ (Запускаем фоновое отложенное напоминание)
-    cancel_user_reminder(user_id) # Удаляем старое, если было
-    reminder_text = (
-        "⏳ <b>Ти зупинився на півшляху!</b>\n"
-        "Твій поточний тест НМТ все ще відкритий. Інші абітурієнти зараз проходять завдання та обганяють тебе в рейтингу. "
-        "Повернись і заверши розпочате! Натисни /quiz"
-    )
-    # Напоминание сработает через 20 минут (1200 секунд), если юзер забросит тест
-    ACTIVE_REMINDERS[user_id] = asyncio.create_task(
-        schedule_quiz_reminder(user_id, bot, 1200, reminder_text)
-    )
     
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-    await send_next_question_ui(callback.message, all_tasks[0], 0, len(all_tasks), edit=False)
+    # Передаємо Bot для встановлення таймера всередині UI генератора
+    await send_next_question_ui(callback.message, all_tasks[0], 0, len(all_tasks), bot, edit=False)
     await callback.answer()
 
 
-async def send_next_question_ui(message: Message, task: dict, index: int, total: int, edit: bool = False):
+async def send_next_question_ui(message: Message, task: dict, index: int, total: int, bot: Bot, edit: bool = False):
+    user_id = message.chat.id
+    cancel_user_reminder(user_id) # Повністю чистимо старий таймер
+    
+    # Ставимо ОДИН таймер на 20 хвилин для поточного питання
+    reminder_text = "🎯 <b>Твій тест чекає!</b> Ти відволікся, але регулярність — це запорука 190+ балів на НМТ. Закінчи тест прямо зараз! Натисни /quiz"
+    ACTIVE_REMINDERS[user_id] = asyncio.create_task(
+        schedule_quiz_reminder(user_id, bot, 1200, reminder_text)
+    )
+
     buttons = []
     for opt in task["options"]:
         buttons.append([InlineKeyboardButton(text=opt, callback_data=f"select_{opt[0]}")])
@@ -198,35 +195,27 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext, bot:
     selected = callback.data.split("_")[1]
     user_id = callback.from_user.id
     
-    # Продлеваем / обновляем наше отложенное напоминание еще на 20 минут, так как юзер активен!
+    # Зупиняємо таймер "на подумати", бо користувач вже клікнув відповідь!
     cancel_user_reminder(user_id)
-    reminder_text = "🎯 <b>Твій тест чекає!</b> Ти відволікся, але регулярність — це запорука 190+ балів на НМТ. Закінчи тест прямо зараз! Натисни /quiz"
-    ACTIVE_REMINDERS[user_id] = asyncio.create_task(
-        schedule_quiz_reminder(user_id, bot, 1200, reminder_text)
-    )
     
     session_data = await state.get_data()
     tasks = session_data.get("tasks", [])
     current_index = session_data.get("current_index", 0)
     correct_count = session_data.get("correct_count", 0)
+    is_premium = session_data.get("is_premium", False)
     
     if not tasks or current_index >= len(tasks):
-        cancel_user_reminder(user_id)
         await state.clear()
         await callback.answer("❌ Сесія тестування застаріла.", show_alert=True)
         return
         
     task = tasks[current_index]
-    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     is_correct = (selected == task["correct_answer"])
     
-    # await save_attempt(user_id, task["id"], selected, is_correct)
-    
-    new_passed = user.get("total_tests_passed", 0) + 1
-    supabase.table("users").update({"total_tests_passed": new_passed}).eq("id", user_id).execute()
+    # Оптимізація БД: інкремент лічильника без попереднього важкого SELECT
+    supabase.rpc("increment_total_tests", {"user_id": user_id}).execute()
     
     buttons = []
-    
     if is_correct:
         correct_count += 1
         await state.update_data(correct_count=correct_count)
@@ -234,7 +223,7 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext, bot:
     else:
         result_text = f"❌ <b>Неправильно.</b>\n\nПравильна відповідь: <code>{html.escape(task['correct_answer'])}</code>\n\n"
         
-        if user["is_premium"]:
+        if is_premium:
             if task.get("explanation"):
                 result_text += f"💡 <b>Пояснення помилки:</b>\n{html.escape(task['explanation'])}"
             else:
@@ -299,9 +288,10 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext, bo
     await state.update_data(current_index=next_index)
     
     if next_index < len(tasks):
-        await send_next_question_ui(callback.message, tasks[next_index], next_index, len(tasks), edit=True)
+        # Передаємо bot, щоб завести новий чистий таймер на наступне питання
+        await send_next_question_ui(callback.message, tasks[next_index], next_index, len(tasks), bot, edit=True)
     else:
-        # ТЕСТ ПОЛНОСТЬЮ ЗАВЕРШЕН — Отменяем любые напоминания квиза! Юзер молодец.
+        # ТЕСТ ПОВНІСТЮ ЗАВЕРШЕНО — Видаляємо будь-які таймери квізу назавжди!
         cancel_user_reminder(user_id)
         
         correct_count = session_data.get("correct_count", 0)
@@ -326,15 +316,14 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext, bo
             parse_mode="HTML"
         )
         
-        # 🧠 ПСИХОЛОГИЧЕСКИЙ ТРИГГЕР НА ПОДДЕРЖАНИЕ СЕРИИ (Уведомление через 8 часов)
-        # Напоминаем вернуться вечером или на следующий день, играя на чувстве дисциплины
+        # Ставимо нагадування про серію занять через 8 годин
         streak_reminder = (
             "🌟 <b>Твій прогрес під загрозою!</b>\n"
             "Пам'ятаєш свій останній результат? Щоб знання перейшли в довготривалу пам'ять, потрібно повторити практику. "
             "Твої щоденні безкоштовні тести вже оновилися. Не переривай серію занять! Натисни /quiz"
         )
         ACTIVE_REMINDERS[user_id] = asyncio.create_task(
-            schedule_quiz_reminder(user_id, bot, 28800, streak_reminder) # 8 часов = 28800 сек
+            schedule_quiz_reminder(user_id, bot, 28800, streak_reminder)
         )
 
     await callback.answer()
