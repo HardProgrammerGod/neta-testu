@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from openai import AsyncOpenAI
 from config import GROK_API_KEY
 from database.db_client import supabase
@@ -27,10 +28,13 @@ FOOTER_MARKETING = "\n\n📍 <i>Детальний тренажер для ци�
 async def clean_old_ai_chats(user_id: int):
     """Видаляє повідомлення чату, старші за 1 годину (асинхронно)."""
     def _delete():
+        # Фікс: вираховуємо ISO-час через Python замість текстового виразу SQL
+        one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        
         supabase.table("ai_chats") \
             .delete() \
             .eq("user_id", user_id) \
-            .lt("created_at", "now() - interval '1 hour'") \
+            .lt("created_at", one_hour_ago) \
             .execute()
     try:
         await asyncio.to_thread(_delete)
