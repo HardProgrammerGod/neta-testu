@@ -2,7 +2,8 @@ import html
 from aiogram import Router, Bot, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import CommandStart, Command, CommandObject
-from database.db_client import get_or_create_user, supabase
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+from database.db_client import get_or_create_user, purge_blocked_user, supabase
 from config import CHANNEL_ID
 
 router = Router()
@@ -11,7 +12,7 @@ BOT_USERNAME = "netaNMT_bot"
 SUPPORT_BOT = "netaschoolbot"
 CHANNEL_LINK = "https://t.me/nedo_english"
 
-# --- СТАТИЧНІ КЛАВІАТУРИ (Оптимізація пам'яті: RAM = O(1)) ---
+# --- СТАТИЧНІ КЛАВІАТУРИ ---
 KB_SUBSCRIBE = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📢 Підписатися на канал", url=CHANNEL_LINK)],
     [InlineKeyboardButton(text="🔄 Перевірити підписку", callback_data="check_sub")]
@@ -38,17 +39,35 @@ KB_BACK_TO_START = InlineKeyboardMarkup(inline_keyboard=[
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 async def check_subscription(bot: Bot, user_id: int) -> bool:
-    """Перевіряє підписку користувача на обов'язковий канал з обробкою виключень."""
+    """Перевіряє підписку користувача на обов'язковий канал."""
     try:
         member = await bot.get_chat_member(CHANNEL_ID, user_id)
         return member.status in ["member", "administrator", "creator"]
+    except TelegramForbiddenError:
+        # Автоматично видаляємо заблокованого юзера з БД
+        await purge_blocked_user(user_id)
+        return False
     except Exception:
-        # У разі блокувань чи збоїв Telegram API — пропускаємо користувача, щоб бот не «вмирав»
         return True
 
 
+async def safe_send_message(bot: Bot, user_id: int, text: str, **kwargs) -> bool:
+    """Безпечна відправка повідомлення з очищенням БД при блокуванні."""
+    try:
+        await bot.send_message(chat_id=user_id, text=text, **kwargs)
+        return True
+    except TelegramForbiddenError:
+        await purge_blocked_user(user_id)
+        return False
+    except TelegramBadRequest as e:
+        if "chat not found" in e.message.lower() or "user is deactivated" in e.message.lower():
+            await purge_blocked_user(user_id)
+        return False
+    except Exception:
+        return False
+
+
 def build_welcome_text(first_name: str, is_premium: bool, daily_tests_left: int, ai_requests_left: int = 3) -> str:
-    """Генерує інтерфейс головного хабу БЕЗ передачі сирого словника dict."""
     status = "Premium 💎" if is_premium else "Безкоштовний 🆓"
     limit = "∞" if is_premium else daily_tests_left
     ai_limit = "∞" if is_premium else ai_requests_left
@@ -71,21 +90,20 @@ def build_welcome_text(first_name: str, is_premium: bool, daily_tests_left: int,
 
 
 def build_help_text() -> str:
-    """Генерує текст посібника користувача."""
     return (
         "❓ <b>ДОВІДКА ТА ПРАВИЛА ПЛАТФОРМИ</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎯 <b>Як проходити тести?</b>\n"
-        "Натисни <u>🚀 Почати тест</u> або введи команду /quiz. Обери категорію (Авторські тести, Зливи НМТ або Пробні варіанти) та запускай тренажер.\n\n"
+        "Натисни <u>🚀 Почати тест</u> або введи команду /quiz. Обери категорію та запускай тренажер.\n\n"
         "🧠 <b>Що таке NetaGPT (/ai)?</b>\n"
-        "Це твій особистий штучний інтелект від Neta School, який пояснить будь-яке граматичне правило, відмінності між словами чи сленг за 5 секунд!\n\n"
+        "Це твій особистий штучний інтелект від Neta School, який пояснить будь-яке граматичне правило за 5 секунд!\n\n"
         "🆓 <b>Безкоштовний тариф:</b>\n"
-        "Тобі доступно <b>3 безкоштовні тести</b> та <b>3 запити до AI</b> на добу. Оновлення лімітів відбувається автоматично кожні 24 години.\n\n"
+        "Тобі доступно <b>3 безкоштовні тести</b> та <b>3 запити до AI</b> на добу.\n\n"
         "👥 <b>Реферальна система:</b>\n"
         "У вкладці <u>👤 Профіль</u> копіюй своє унікальне посилання. "
-        "Коли твій реферал купує Premium доступ, на твій баланс нараховується <b>100 ⭐ (Telegram Stars)</b>, які можна вивести на свій рахунок!\n\n"
+        "Коли твій реферал купує Premium доступ, на твій баланс нараховується <b>100 ⭐ (Telegram Stars)</b>!\n\n"
         "💎 <b>Що дає Premium допуск?</b>\n"
-        "Повний безліміт на тести 24/7, розширені AI-пояснення помилок та 30 запитів/день до NetaGPT.\n"
+        "Повний безліміт на тести 24/7 та розширені AI-пояснення помилок.\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📩 Виникли питання чи знайшов баг? Напиши куратору системи."
     )
@@ -102,13 +120,16 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
     # 1. Отримання або створення користувача
     user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
 
-    # 2. Оптимізована реферальна логіка (Безпечна робота з базою)
-    if args and args.isdigit() and not user.get("referred_by"):
+    # 2. РЕФЕРАЛЬНА СИСТЕМА + ЗАХИСТ ВІД НАКРУТКИ
+    if args and args.isdigit():
         referrer_id = int(args)
         
-        if referrer_id != user_id:
-            try:
-                # Перевіряємо існування реферера
+        if referrer_id != user_id and not user.get("referred_by"):
+            # 2.1 Перевіряємо вето-список used_referrals (чи цей tg_id вже фігурував раніше)
+            used_ref = supabase.table("used_referrals").select("user_id").eq("user_id", user_id).execute()
+            
+            if not used_ref.data:
+                # 2.2 Перевіряємо існування реферера
                 ref_check = supabase.table("users").select("referral_count").eq("id", referrer_id).execute()
                 
                 if ref_check.data:
@@ -116,22 +137,22 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
                     supabase.table("users").update({"referred_by": referrer_id}).eq("id", user_id).execute()
                     user["referred_by"] = referrer_id
                     
-                    # Безпечне атомарне оновлення лічильника
+                    # Заносимо юзера у veto-список used_referrals назавжди
+                    supabase.table("used_referrals").insert({"user_id": user_id}).execute()
+                    
+                    # Збільшуємо лічильник реферера
                     current_ref_count = ref_check.data[0].get("referral_count", 0) or 0
                     supabase.table("users").update({
                         "referral_count": current_ref_count + 1
                     }).eq("id", referrer_id).execute()
                     
-                    try:
-                        await bot.send_message(
-                            chat_id=referrer_id,
-                            text="👤 <b>За твоїм посиланням зареєструвався новий учень!</b>\nКоли він придбає Premium, ти отримаєш 100 Stars ⭐",
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    # Надсилаємо сповіщення
+                    await safe_send_message(
+                        bot,
+                        referrer_id,
+                        "👤 <b>За твоїм посиланням зареєструвався новий учень!</b>\nКоли він придбає Premium, ти отримаєш 100 Stars ⭐",
+                        parse_mode="HTML"
+                    )
 
     # 3. Перевірка підписки
     if not await check_subscription(bot, user_id):
@@ -143,7 +164,6 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         )
         return
 
-    # Надсилаємо головний хаб
     welcome_text = build_welcome_text(
         first_name=user.get('first_name', 'Користувач'),
         is_premium=user.get('is_premium', False),
@@ -162,7 +182,7 @@ async def cmd_help(message: Message, bot: Bot):
 
 
 # ---------------------------
-# CALLBACK HANDLERS (ІНТЕРАКТИВ)
+# CALLBACK HANDLERS
 # ---------------------------
 @router.callback_query(F.data == "check_sub")
 async def check_sub(callback: CallbackQuery, bot: Bot):
@@ -174,7 +194,6 @@ async def check_sub(callback: CallbackQuery, bot: Bot):
         except Exception:
             pass
             
-        # БЕЗПЕЧНЕ ВІДПРАВЛЕННЯ: прямий чистий запит профілю
         user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
         welcome_text = build_welcome_text(
             first_name=user.get('first_name', 'Користувач'),
@@ -195,10 +214,6 @@ async def inline_help(callback: CallbackQuery):
 
 @router.callback_query(F.data == "back_to_start_hub")
 async def back_to_start(callback: CallbackQuery, bot: Bot):
-    """
-    Повертає з довідки на головний вітальний екран.
-    ОПТИМІЗАЦИЯ: Легкий точковий SELECT лише необхідних полів.
-    """
     user_id = callback.from_user.id
     
     res = supabase.table("users") \
@@ -207,10 +222,11 @@ async def back_to_start(callback: CallbackQuery, bot: Bot):
         .execute()
     
     if not res.data:
-        await callback.answer("Помилка профілю.", show_alert=True)
-        return
+        # Якщо запис був видалений під час блокування — створюємо новий
+        user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
+    else:
+        user = res.data[0]
         
-    user = res.data[0]
     welcome_text = build_welcome_text(
         first_name=user.get('first_name', 'Користувач'),
         is_premium=user.get('is_premium', False),
