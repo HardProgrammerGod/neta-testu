@@ -1,9 +1,11 @@
 import asyncio
+import logging
 from openai import AsyncOpenAI
 from config import GROK_API_KEY
 from database.db_client import supabase
 
-# xAI Grok сумісний з OpenAI SDK
+logger = logging.getLogger(__name__)
+
 client = AsyncOpenAI(
     api_key=GROK_API_KEY,
     base_url="https://api.x.ai/v1"
@@ -22,54 +24,63 @@ SYSTEM_PROMPT = (
 FOOTER_MARKETING = "\n\n📍 <i>Детальний тренажер для цих тем доступний на нашій інтерактивній веб-платформі Neta School.</i>"
 
 async def clean_old_ai_chats(user_id: int):
-    """Видаляє повідомлення чату, старші за 1 годину (захист пам'яті Supabase)."""
-    try:
-        # PostgreSQL syntax: created_at < NOW() - INTERVAL '1 hour'
+    """Видаляє повідомлення чату, старші за 1 годину (асинхронно)."""
+    def _delete():
         supabase.table("ai_chats") \
             .delete() \
             .eq("user_id", user_id) \
             .lt("created_at", "now() - interval '1 hour'") \
             .execute()
-    except Exception:
-        pass
+    try:
+        await asyncio.to_thread(_delete)
+    except Exception as e:
+        logger.error(f"Error cleaning old AI chats: {e}")
 
 async def get_grok_tutor_response(user_id: int, user_message: str) -> str:
-    """Чат-асистент AI-Tutor з урахуванням 1 останнього контексту."""
+    """Чат-асистент AI-Tutor з урахуванням останнього контексту."""
     await clean_old_ai_chats(user_id)
     
-    # Витягуємо останні 2 повідомлення (для економії токенів)
-    history_res = supabase.table("ai_chats") \
-        .select("role", "content") \
-        .eq("user_id", user_id) \
-        .order("created_at", desc=True) \
-        .limit(2) \
-        .execute()
-    
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    
-    if history_res.data:
-        for msg in reversed(history_res.data):
-            messages.append({"role": msg["role"], "content": msg["content"]})
-            
-    messages.append({"role": "user", "content": user_message})
+    # Витягуємо останні повідомлення асинхронно
+    def _fetch_history():
+        return supabase.table("ai_chats") \
+            .select("role", "content") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .limit(2) \
+            .execute()
 
     try:
+        history_res = await asyncio.to_thread(_fetch_history)
+        
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        
+        if history_res and history_res.data:
+            for msg in reversed(history_res.data):
+                messages.append({"role": msg["role"], "content": msg["content"]})
+                
+        messages.append({"role": "user", "content": user_message})
+
+        # Запит до Grok API (актуальна модель grok-2-mini)
         response = await client.chat.completions.create(
-            model="grok-beta", # або актуальна версія grok-2-mini
+            model="grok-2-mini",
             messages=messages,
-            max_tokens=300, # Суворе обмеження токенів
+            max_tokens=300,
             temperature=0.4
         )
         ans_text = response.choices[0].message.content.strip() + FOOTER_MARKETING
         
-        # Зберігаємо лише поточний діалог у БД
-        supabase.table("ai_chats").insert([
-            {"user_id": user_id, "role": "user", "content": user_message},
-            {"user_id": user_id, "role": "assistant", "content": ans_text}
-        ]).execute()
+        # Зберігаємо діалог у БД асинхронно
+        def _save_history():
+            supabase.table("ai_chats").insert([
+                {"user_id": user_id, "role": "user", "content": user_message},
+                {"user_id": user_id, "role": "assistant", "content": ans_text}
+            ]).execute()
+
+        await asyncio.to_thread(_save_history)
         
         return ans_text
     except Exception as e:
+        logger.error(f"Grok API Error for user {user_id}: {e}", exc_info=True)
         return "⚠️ Вибач, NetaGPT зараз перевантажений. Спробуй поставити запитання трохи пізніше!"
 
 async def generate_study_plan(user_id: int, wrong_topics: list) -> str:
@@ -82,7 +93,7 @@ async def generate_study_plan(user_id: int, wrong_topics: list) -> str:
     
     try:
         response = await client.chat.completions.create(
-            model="grok-beta",
+            model="grok-2-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
@@ -91,5 +102,6 @@ async def generate_study_plan(user_id: int, wrong_topics: list) -> str:
             temperature=0.3
         )
         return response.choices[0].message.content.strip() + FOOTER_MARKETING
-    except Exception:
+    except Exception as e:
+        logger.error(f"Generate Study Plan Error: {e}")
         return "📍 <i>Повтори зазначені теми та опрацюй їх у нашому тренажері!</i>"
