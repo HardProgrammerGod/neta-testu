@@ -6,16 +6,17 @@ from database.db_client import supabase
 
 logger = logging.getLogger(__name__)
 
+# Ініціалізація клієнта Groq (використовує OpenAI SDK)
 client = AsyncOpenAI(
-    api_key=GROK_API_KEY,
-    base_url="https://api.x.ai/v1"
+    api_key=GROK_API_KEY,  # Твій ключ від Groq Cloud (починається на gsk_...)
+    base_url="https://api.groq.com/openai/v1"
 )
 
 SYSTEM_PROMPT = (
     "Ти — NetaGPT, персональний AI-методист із підготовки до НМТ з англійської мови від Neta School. "
     "Твоє завдання — пояснювати граматику, сленг, лексику та помилки НМТ коротко, зрозуміло, стисло та дружньо. "
     "КРИТИЧНІ ПРАВИЛА:\n"
-    "1. НІКОЛИ не кажи, що ти Grok, xAI, OpenAI чи ChatGPT. Ти виключно NetaGPT!\n"
+    "1. НІКОЛИ не кажи, що ти Llama, Meta, Groq, OpenAI чи ChatGPT. Ти виключно NetaGPT!\n"
     "2. Відповідай УКРАЇНСЬКОЮ мовою.\n"
     "3. Будь максимально лаконічним (максимум 150-200 слів), без 'води', давай тільки суть і приклади.\n"
     "4. Використовуй емодзі для розставиння акцентів."
@@ -40,7 +41,6 @@ async def get_grok_tutor_response(user_id: int, user_message: str) -> str:
     """Чат-асистент AI-Tutor з урахуванням останнього контексту."""
     await clean_old_ai_chats(user_id)
     
-    # Витягуємо останні повідомлення асинхронно
     def _fetch_history():
         return supabase.table("ai_chats") \
             .select("role", "content") \
@@ -60,16 +60,15 @@ async def get_grok_tutor_response(user_id: int, user_message: str) -> str:
                 
         messages.append({"role": "user", "content": user_message})
 
-        # Запит до Grok API (актуальна модель grok-2-mini)
+        # Запит до Groq API з моделлю Llama 3.3 70B
         response = await client.chat.completions.create(
-            model="grok-2-mini",
+            model="llama-3.3-70b-versatile",
             messages=messages,
-            max_tokens=300,
+            max_tokens=400,
             temperature=0.4
         )
         ans_text = response.choices[0].message.content.strip() + FOOTER_MARKETING
         
-        # Зберігаємо діалог у БД асинхронно
         def _save_history():
             supabase.table("ai_chats").insert([
                 {"user_id": user_id, "role": "user", "content": user_message},
@@ -80,7 +79,7 @@ async def get_grok_tutor_response(user_id: int, user_message: str) -> str:
         
         return ans_text
     except Exception as e:
-        logger.error(f"Grok API Error for user {user_id}: {e}", exc_info=True)
+        logger.error(f"Groq API Error for user {user_id}: {e}", exc_info=True)
         return "⚠️ Вибач, NetaGPT зараз перевантажений. Спробуй поставити запитання трохи пізніше!"
 
 async def generate_study_plan(user_id: int, wrong_topics: list) -> str:
@@ -93,7 +92,7 @@ async def generate_study_plan(user_id: int, wrong_topics: list) -> str:
     
     try:
         response = await client.chat.completions.create(
-            model="grok-2-mini",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
