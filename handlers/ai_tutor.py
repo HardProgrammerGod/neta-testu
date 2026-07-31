@@ -1,4 +1,5 @@
 import html
+import asyncio
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -28,14 +29,13 @@ async def cmd_ai_tutor(event: Message | CallbackQuery, bot: Bot, state: FSMConte
 
     user = await get_or_create_user(user_id, event.from_user.username, event.from_user.first_name)
     
-    # Перевірка лімітів
     ai_left = user.get("ai_requests_left", 3)
     is_premium = user.get("is_premium", False)
 
     if not is_premium and ai_left <= 0:
         text = (
             "🔒 <b>Твої безкоштовні AI-запити на сьогодні вичерпано!</b>\n\n"
-            "Отримай **Premium**, щоб користуватися NetaGPT без обмежень (30 запитів/день) "
+            "Отримай <b>Premium</b>, щоб користуватися NetaGPT без обмежень "
             "та отримувати повні розбори всіх правил!"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -81,17 +81,17 @@ async def process_ai_question(message: Message, state: FSMContext, bot: Bot):
         await message.answer("⚠️ Введення перервано командою.")
         return
 
-    # 1. Повідомлення про очікування ("Нейромережа думає")
     wait_msg = await message.answer("🧠 <b>NetaGPT аналізує твій запит...</b>\n<i>Зачекай кілька секунд.</i>", parse_mode="HTML")
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
-    # 2. Отримання відповіді від Grok
     answer = await get_grok_tutor_response(user_id, user_text)
 
-    # 3. Списання ліміту для Free користувачів
+    # Списання ліміту для Free користувачів (асинхронно)
     user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     if not user.get("is_premium"):
-        supabase.rpc("decrease_ai_limit", {"p_user_id": user_id}).execute()
+        def _decrease_limit():
+            supabase.rpc("decrease_ai_limit", {"p_user_id": user_id}).execute()
+        await asyncio.to_thread(_decrease_limit)
 
     await state.clear()
     await wait_msg.edit_text(answer, parse_mode="HTML", reply_markup=KB_CANCEL_AI)
