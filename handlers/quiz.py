@@ -141,9 +141,10 @@ async def start_specific_test(callback: CallbackQuery, bot: Bot, state: FSMConte
         tasks=all_tasks,
         current_index=0,
         correct_count=0,
+        wrong_sections=[],  # Ініціалізуємо список тем для збору помилок
         category=category,
         sub_category=sub_category,
-        is_premium=user["is_premium"] # Кешуємо статус преміуму в FSM, щоб не смикати БД кожне питання
+        is_premium=user["is_premium"]  # Кешуємо статус преміуму
     )
     await state.set_state(QuizSession.in_progress)
     
@@ -203,6 +204,7 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext, bot:
     tasks = session_data.get("tasks", [])
     current_index = session_data.get("current_index", 0)
     correct_count = session_data.get("correct_count", 0)
+    wrong_sections = session_data.get("wrong_sections", [])
     is_premium = session_data.get("is_premium", False)
     
     if not tasks or current_index >= len(tasks):
@@ -222,11 +224,16 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext, bot:
         await state.update_data(correct_count=correct_count)
         result_text = "🎉 <b>Правильно! Чудова робота.</b>"
     else:
+        # Фіксуємо тему з помилкою
+        section_name = task.get("section", "Grammar")
+        wrong_sections.append(section_name)
+        await state.update_data(wrong_sections=wrong_sections)
+
         result_text = f"❌ <b>Неправильно.</b>\n\nПравильна відповідь: <code>{html.escape(task['correct_answer'])}</code>\n\n"
         
         if is_premium:
             if task.get("explanation"):
-                result_text += f"💡 <b>Пояснення помилки:</b>\n{html.escape(task['explanation'])}"
+                result_text += f"🧠 <b>AI Insights (Аналіз від NetaGPT):</b>\n{html.escape(task['explanation'])}"
             else:
                 result_text += "💡 Адмін ще не додав розгорнуте пояснення до цього завдання."
         else:
@@ -234,7 +241,7 @@ async def handle_session_answer(callback: CallbackQuery, state: FSMContext, bot:
                 full_exp = task['explanation']
                 teaser = full_exp[:45] + "..." if len(full_exp) > 45 else full_exp
                 result_text += (
-                    f"💡 <b>Пояснення помилки (Тизер):</b>\n<i>{html.escape(teaser)}</i>\n\n"
+                    f"🧠 <b>AI Insights (Тизер аналізу від NetaGPT):</b>\n<i>{html.escape(teaser)}</i>\n\n"
                     f"🔒 <b>Повний розбір правила доступний лише Premium учням!</b> "
                     f"Не втрачай бали на реальному НМТ через прості помилки."
                 )
@@ -277,7 +284,7 @@ async def process_inline_buy_premium(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
-# 5. Крок вперед (Безпечний перехід)
+# 5. Крок вперед (Безпечний перехід та фінал)
 @router.callback_query(QuizSession.in_progress, F.data == "session_next_step")
 async def process_next_step_click(callback: CallbackQuery, state: FSMContext, bot: Bot):
     user_id = callback.from_user.id
@@ -296,6 +303,8 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext, bo
         cancel_user_reminder(user_id)
         
         correct_count = session_data.get("correct_count", 0)
+        wrong_sections = session_data.get("wrong_sections", [])
+        
         await state.clear()
         success_pct = int((correct_count / len(tasks)) * 100) if tasks else 0
         
@@ -306,15 +315,34 @@ async def process_next_step_click(callback: CallbackQuery, state: FSMContext, bo
         else:
             rating = "⚠️ Треба підтягнути знання. Premium розбори допоможуть закрити прогалини."
 
-        await callback.message.edit_text(
+        finish_text = (
             f"🏁 <b>ТЕСТ ЗАВЕРШЕНО!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 <b>Твій підсумковий результат:</b>\n"
             f"✅ Правильних відповідей: <code>{correct_count}</code> з <code>{len(tasks)}</code>\n"
             f"📈 Успішність: <b><code>{success_pct}%</code></b>\n\n"
-            f"📋 Вердикт: <i>{rating}</i>\n\n"
-            f"👉 Напиши /quiz, щоб відкрити каталог та спробувати інший тест!",
-            parse_mode="HTML"
+            f"📋 Вердикт: <i>{rating}</i>\n"
+        )
+
+        # Генерація асинхронного AI-плану
+        if wrong_sections:
+            unique_wrongs = list(set(wrong_sections))[:3]
+            try:
+                plan = await generate_study_plan(user_id, unique_wrongs)
+                finish_text += f"\n🎯 <b>Персональний план від NetaGPT:</b>\n{plan}\n\n"
+            except Exception:
+                pass
+
+        finish_text += "👉 Натисни кнопку нижче або напиши /quiz, щоб відкрити каталог!"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Інший тест", callback_data="back_to_main_menu")]
+        ])
+
+        await callback.message.edit_text(
+            finish_text,
+            parse_mode="HTML",
+            reply_markup=kb
         )
         
         # Ставимо нагадування про серію занять через 8 годин
