@@ -12,6 +12,7 @@ def get_int(name: str, default=0):
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 CHANNEL_ID = get_int("CHANNEL_ID")
 ADMIN_ID = get_int("ADMIN_ID")
