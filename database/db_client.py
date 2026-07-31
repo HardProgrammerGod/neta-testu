@@ -11,8 +11,8 @@ async def get_or_create_user(tg_id: int, username: str, first_name: str):
     if not res.data:
         user = {
             "id": tg_id,
-            "username": username,
-            "first_name": first_name,
+            "username": username or "",
+            "first_name": first_name or "Учень",
             "daily_tests_left": 3,
             "last_test_date": today,
             "is_premium": False,
@@ -22,10 +22,21 @@ async def get_or_create_user(tg_id: int, username: str, first_name: str):
             "referral_balance": 0
         }
         supabase.table("users").insert(user).execute()
+        
+        # Інкрементуємо загальний лічильник реєстрацій для статистики
+        try:
+            stats = supabase.table("global_stats").select("total_users_count").eq("id", 1).execute()
+            if stats.data:
+                current_total = stats.data[0].get("total_users_count", 0)
+                supabase.table("global_stats").update({"total_users_count": current_total + 1}).eq("id", 1).execute()
+        except Exception:
+            pass
+
         return user
 
     user = res.data[0]
 
+    # Перевірка та оновлення денного ліміту
     if user.get("last_test_date") != today:
         supabase.table("users").update({
             "daily_tests_left": 3,
@@ -35,8 +46,17 @@ async def get_or_create_user(tg_id: int, username: str, first_name: str):
 
     return user
 
+
+async def purge_blocked_user(user_id: int):
+    """Видаляє користувача з БД, якщо він заблокував бота."""
+    try:
+        supabase.table("users").delete().eq("id", user_id).execute()
+    except Exception as e:
+        print(f"Error purging user {user_id}: {e}")
+
+
 async def get_full_test_tasks(category: str, sub_category: str):
-    """Достает сразу весь пул вопросов для конкретного варианта за 1 запрос"""
+    """Достає одразу весь пул питань для конкретного варіанта за 1 запит"""
     res = supabase.table("tasks") \
         .select("*") \
         .eq("category", category) \
@@ -45,10 +65,12 @@ async def get_full_test_tasks(category: str, sub_category: str):
         .execute()
     return res.data
 
+
 async def decrease_test_limit(tg_id: int, current_left: int):
     supabase.table("users").update({
         "daily_tests_left": max(0, current_left - 1)
     }).eq("id", tg_id).execute()
+
 
 async def save_attempt(user_id: int, task_id: int, answer: str, is_correct: bool):
     supabase.table("user_attempts").insert({
