@@ -1,9 +1,10 @@
 import html
+import asyncio
 from aiogram import Router, Bot, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
-from database.db_client import get_or_create_user, purge_blocked_user, supabase
+from database.db_client import get_or_create_user, mark_user_inactive, supabase
 from config import CHANNEL_ID
 
 router = Router()
@@ -44,24 +45,24 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
         member = await bot.get_chat_member(CHANNEL_ID, user_id)
         return member.status in ["member", "administrator", "creator"]
     except TelegramForbiddenError:
-        # Автоматично видаляємо заблокованого юзера з БД
-        await purge_blocked_user(user_id)
+        # Маркуємо користувача неактивним (Soft Delete)
+        await mark_user_inactive(user_id)
         return False
     except Exception:
         return True
 
 
 async def safe_send_message(bot: Bot, user_id: int, text: str, **kwargs) -> bool:
-    """Безпечна відправка повідомлення з очищенням БД при блокуванні."""
+    """Безпечна відправка повідомлення з позначкою в БД при блокуванні."""
     try:
         await bot.send_message(chat_id=user_id, text=text, **kwargs)
         return True
     except TelegramForbiddenError:
-        await purge_blocked_user(user_id)
+        await mark_user_inactive(user_id)
         return False
     except TelegramBadRequest as e:
         if "chat not found" in e.message.lower() or "user is deactivated" in e.message.lower():
-            await purge_blocked_user(user_id)
+            await mark_user_inactive(user_id)
         return False
     except Exception:
         return False
@@ -125,34 +126,40 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         referrer_id = int(args)
         
         if referrer_id != user_id and not user.get("referred_by"):
-            # 2.1 Перевіряємо вето-список used_referrals (чи цей tg_id вже фігурував раніше)
-            used_ref = supabase.table("used_referrals").select("user_id").eq("user_id", user_id).execute()
-            
-            if not used_ref.data:
-                # 2.2 Перевіряємо існування реферера
-                ref_check = supabase.table("users").select("referral_count").eq("id", referrer_id).execute()
+            def _ref_process():
+                # 2.1 Перевіряємо вето-список used_referrals (чи цей tg_id вже фігурував раніше)
+                used_ref = supabase.table("used_referrals").select("user_id").eq("user_id", user_id).execute()
                 
-                if ref_check.data:
-                    # Прив'язуємо реферера до нового юзера
-                    supabase.table("users").update({"referred_by": referrer_id}).eq("id", user_id).execute()
-                    user["referred_by"] = referrer_id
+                if not used_ref.data:
+                    # 2.2 Перевіряємо існування реферера
+                    ref_check = supabase.table("users").select("referral_count").eq("id", referrer_id).execute()
                     
-                    # Заносимо юзера у veto-список used_referrals назавжди
-                    supabase.table("used_referrals").insert({"user_id": user_id}).execute()
-                    
-                    # Збільшуємо лічильник реферера
-                    current_ref_count = ref_check.data[0].get("referral_count", 0) or 0
-                    supabase.table("users").update({
-                        "referral_count": current_ref_count + 1
-                    }).eq("id", referrer_id).execute()
-                    
-                    # Надсилаємо сповіщення
-                    await safe_send_message(
-                        bot,
-                        referrer_id,
-                        "👤 <b>За твоїм посиланням зареєструвався новий учень!</b>\nКоли він придбає Premium, ти отримаєш 100 Stars ⭐",
-                        parse_mode="HTML"
-                    )
+                    if ref_check.data:
+                        # Прив'язуємо реферера до нового юзера
+                        supabase.table("users").update({"referred_by": referrer_id}).eq("id", user_id).execute()
+                        
+                        # Заносимо юзера у veto-список used_referrals назавжди
+                        supabase.table("used_referrals").insert({"user_id": user_id}).execute()
+                        
+                        # Збільшуємо лічильник реферера
+                        current_ref_count = ref_check.data[0].get("referral_count", 0) or 0
+                        supabase.table("users").update({
+                            "referral_count": current_ref_count + 1
+                        }).eq("id", referrer_id).execute()
+                        return True
+                return False
+
+            is_processed = await asyncio.to_thread(_ref_process)
+            
+            if is_processed:
+                user["referred_by"] = referrer_id
+                # Надсилаємо сповіщення
+                await safe_send_message(
+                    bot,
+                    referrer_id,
+                    "👤 <b>За твоїм посиланням зареєструвався новий учень!</b>\nКоли він придбає Premium, ти отримаєш 100 Stars ⭐",
+                    parse_mode="HTML"
+                )
 
     # 3. Перевірка підписки
     if not await check_subscription(bot, user_id):
@@ -216,16 +223,18 @@ async def inline_help(callback: CallbackQuery):
 async def back_to_start(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
     
-    res = supabase.table("users") \
-        .select("first_name", "is_premium", "daily_tests_left", "ai_requests_left") \
-        .eq("id", user_id) \
-        .execute()
+    def _fetch_user():
+        return supabase.table("users") \
+            .select("first_name", "is_premium", "daily_tests_left", "ai_requests_left") \
+            .eq("id", user_id) \
+            .execute().data or []
+
+    res_data = await asyncio.to_thread(_fetch_user)
     
-    if not res.data:
-        # Якщо запис був видалений під час блокування — створюємо новий
+    if not res_data:
         user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     else:
-        user = res.data[0]
+        user = res_data[0]
         
     welcome_text = build_welcome_text(
         first_name=user.get('first_name', 'Користувач'),
