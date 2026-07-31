@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from database.db_client import get_or_create_user, decrease_test_limit, supabase
 from handlers.start import check_subscription
+from services.grok_service import generate_study_plan
 
 router = Router()
 
